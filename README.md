@@ -6,10 +6,23 @@ GuaDa 的**三方插件**参考实现：把「人格 / 规则集 / 技能库 / �
 
 ## 状态
 
-- **Phase 0（当前）**：插件骨架、manifest、设置页占位、安装链路。
-- Phase 1：提示词段 / 规则集 / 技能 / 设置页。
+- **Phase 0**：插件骨架、manifest、设置页占位、安装链路。
+- **Phase 1（当前）**：提示词段 / 规则集 / 技能库 / 模型工具 / RPC / 设置页。
 - Phase 2：入口按钮 / 右侧 dock / 动作命令 / hook。
 - Phase 3：快照回滚 / 权限审计 / 全量验收。
+
+### Phase 1 已具备
+
+| 能力 | 实现 |
+|---|---|
+| 人格 / 提示词 | `registerPromptSection('guada-purge.persona', order=-100)`；`prompt-inject.md` 优先于 state.persona |
+| 规则集 | `registerPromptSection('guada-purge.rules', order=100)`；按 `session.workspacePath` 做 glob 匹配 |
+| 技能库 | 随包 `skills/*.md` → `registerSkill`（6 条防御/规范类） |
+| 模型工具 | `purge_status`（只读）/ `purge_apply` / `purge_revert` |
+| 设置页 | `settings` slot：状态 / 提示词 / 规则集三页签，走 `registerRpc` |
+| 数据目录 | `api.getDataDir()`：`prompt-inject.md`、`rules/*.md`、`state.json`（原子写 + `.bad` 修复） |
+
+改动在下一次提示词装配（下一轮/下一步）生效；无需重启宿主。
 
 ## 安装
 

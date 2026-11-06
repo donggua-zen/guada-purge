@@ -1,7 +1,7 @@
 {
   "id": "guada-purge",
   "name": "GuaDa Purge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "人格、规则与技能控制台 —— GuaDa 三方插件参考实现（dsh-purge 风格）",
   "author": "donggua-zen",
   "category": "user",

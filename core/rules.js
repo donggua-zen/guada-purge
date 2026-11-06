@@ -74,9 +74,13 @@ function matchAny(workspacePath, patterns) {
   return patterns.some((pattern) => {
     const p = normalizePath(pattern);
     if (!p) return true;
-    if (globToRegExp(p).test(target)) return true;
+    // 相对模式（frontend/**）按"路径中任意位置"匹配；绝对模式（D:/x/**）原样匹配。
+    const scoped = /^([A-Za-z]:|\/)/.test(p) ? p : `**/${p}`;
+    if (globToRegExp(scoped).test(target)) return true;
+    // 目录模式：`x/**` 同时匹配目录本身（/a/x）与子路径（/a/x/y）
+    if (scoped.endsWith('/**') && globToRegExp(scoped.slice(0, -3)).test(target)) return true;
     // 目录前缀语义：pattern 为目录时匹配其子路径
-    return target === p || target.startsWith(`${p}/`);
+    return target === p || target.startsWith(`${p}/`) || target.endsWith(`/${p}`);
   });
 }
 
