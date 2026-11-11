@@ -8,18 +8,25 @@
 
 ---
 
-## 现在有什么（P3-4：工具已对齐上游）
+## 现在有什么（v2.5.0：能力对齐上游）
 
 | 类别 | 内容 |
 |---|---|
 | 智能体 | **6 个**：`红队指挥官`（可见）+ 5 个执行角色（隐藏：信息收集 / 资产梳理 / 漏洞发现 / 漏洞利用 / 内网渗透） |
-| 工具 | **61 个** `redteam_*`（上游 64，差 3 个 `role_*` 不做——角色人格在 systemPrompt 里，不需要运行时注入） |
-| 技能 | **7 条**：`recon-pipeline` / `fofa-recon` / `nuclei-scan` / `webshell-toolkit` / `fscan-intranet` / `credential-attack` / `redteam-authorization` |
+| 工具 | **61 个** `redteam_*`（上游 64，差 3 个 `role_*` 不做——角色人格在 systemPrompt 里） |
+| 技能 | **24 条**（上游 23 条全量 + 1 条自加的 `redteam-authorization` 授权检查） |
 | 资产库 | `$USERDATA/plugins-data/guada-purge/redteam.json`（零依赖 JSON，可直接看） |
 
-工具覆盖：演练 / 资产（增查统计评估/详情/关系/图谱/时间线/连通探测）/ 漏洞（登记/查重/状态流转）/
-证据（链式升级/HTTP 报文归档/复现核实）/ 入口（WebShell/隧道/凭据/访问会话）/ 截图 /
-评分 / 预检 / 派活闸门 / 攻击链 / Markdown 报告 / 未知资产 / **PoC 知识库** / 演练总览 / Web 列表 / 域名索引。
+技能分组：
+
+| 组 | 技能 |
+|---|---|
+| 侦察（6） | `recon-pipeline` `fofa-recon` `passive-recon` `web-fingerprint` `active-scan` `asset-correlation` |
+| 漏洞（4） | `nuclei-scan` `dir-bruteforce` `unauth-exploit` `credential-attack` |
+| 利用（5） | `webshell-toolkit` `shell-handler` `browser-automation` `lateral-movement` `vps-reverse-shell` |
+| 隧道（4） | `suo5-tunnel` `chisel-tunnel` `frp-tunnel` |
+| 内网（2） | `fscan-intranet` `gogo-intranet` |
+| 环境与可选（4） | `redteam-setup` `redteam-authorization` `cn-proxy-pool` `kimi-webbridge` |
 
 ### 资产深挖（P3-2 新增）
 
@@ -120,8 +127,8 @@ redteam_unknown_*      暂时说不清的资产先挂着，不丢
 | **P3-1 ✅** | 攻击链 + Markdown 报告 + 未知资产（13 个工具，共 36） |
 | **P3-2 ✅** | 资产深挖（详情/关系/图谱/时间线/连通探测）+ 状态流转 + HTTP 证据 + 截图（13 个，共 49） |
 | **P3-3 ✅** | PoC 知识库（6 个，共 55） |
-| **P3-4 ✅（当前）** | 访问会话 / 演练总览 / 会话检查 / Web 列表 / 域名索引（6 个，共 61，工具面**对齐上游**） |
-| P3-5 | 剩余 17 条技能 |
+| **P3-4 ✅** | 访问会话 / 演练总览 / 会话检查 / Web 列表 / 域名索引（6 个，共 61，工具面**对齐上游**） |
+| **P3-5 ✅（当前）** | 17 条技能补齐（共 24 条，**技能面也对齐上游**） |
 
 ## 目录结构
 

@@ -366,13 +366,16 @@ test('指挥官声明能力白名单与可派角色，人设来自 presets/perso
 test('执行角色各有独立人设与技能白名单', async () => {
   await withPlugin(async ({ api }) => {
     const byId = new Map(api.calls.agents.map((a) => [a.id, a]));
-    assert.deepEqual(byId.get('recon').skills, [
-      'recon-pipeline',
-      'fofa-recon',
-      'redteam-authorization',
+    assert.ok(byId.get('recon').skills.includes('passive-recon'));
+    assert.ok(byId.get('recon').skills.includes('active-scan'));
+    assert.deepEqual(byId.get('internal').skills, [
+      'fscan-intranet',
+      'gogo-intranet',
+      'lateral-movement',
+      'redteam-setup',
     ]);
-    assert.deepEqual(byId.get('internal').skills, ['fscan-intranet']);
     assert.ok(byId.get('exploit').skills.includes('webshell-toolkit'));
+    assert.ok(byId.get('exploit').skills.includes('suo5-tunnel'));
     for (const id of ['recon', 'assess', 'vuln-scan', 'exploit', 'internal']) {
       const role = byId.get(id);
       assert.ok(role.systemPrompt.length > 200, `${id} 人设过短`);
@@ -472,6 +475,7 @@ test('靶标继承：子会话按 parentSessionId 落到父会话的演练', asy
 test('技能随能力包注册且内容非空', async () => {
   await withPlugin(async ({ api }) => {
     const names = api.handle.skills.map((s) => s.name).sort();
+    assert.ok(names.length >= 23, `技能数量应覆盖上游 23 条，实际 ${names.length}`);
     for (const expected of [
       'credential-attack',
       'fofa-recon',
@@ -480,6 +484,20 @@ test('技能随能力包注册且内容非空', async () => {
       'recon-pipeline',
       'redteam-authorization',
       'webshell-toolkit',
+      'passive-recon',
+      'web-fingerprint',
+      'active-scan',
+      'dir-bruteforce',
+      'unauth-exploit',
+      'shell-handler',
+      'lateral-movement',
+      'suo5-tunnel',
+      'chisel-tunnel',
+      'frp-tunnel',
+      'vps-reverse-shell',
+      'gogo-intranet',
+      'redteam-setup',
+      'browser-automation',
     ]) {
       assert.ok(names.includes(expected), `缺少技能 ${expected}`);
     }

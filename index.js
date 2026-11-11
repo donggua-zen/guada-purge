@@ -25,7 +25,7 @@ const { probe } = require('./core/probe');
 const store = require('./core/store');
 
 const PLUGIN_ID = 'guada-purge';
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 
 const KIT_ID = 'redteam';
 const AGENT_ID = 'leader';
@@ -45,31 +45,50 @@ const ROLES = [
     id: 'recon',
     name: '信息收集',
     description: '只收集资产并落库，不碰漏洞检测；重点边缘与未备案资产。',
-    skills: ['recon-pipeline', 'fofa-recon', 'redteam-authorization'],
+    skills: [
+      'recon-pipeline',
+      'fofa-recon',
+      'passive-recon',
+      'web-fingerprint',
+      'active-scan',
+      'asset-correlation',
+      'redteam-authorization',
+    ],
   },
   {
     id: 'assess',
     name: '资产梳理',
     description: '逐条评估资产易打性（priority/potential/reason），产出"先打谁"的排序。',
-    skills: ['redteam-authorization'],
+    skills: ['asset-correlation', 'web-fingerprint', 'redteam-authorization'],
   },
   {
     id: 'vuln-scan',
     name: '漏洞发现',
     description: '先查库去重，Nday/1day 优先，再探接口未授权；每条漏洞附原始请求。',
-    skills: ['nuclei-scan', 'recon-pipeline'],
+    skills: ['nuclei-scan', 'recon-pipeline', 'dir-bruteforce', 'unauth-exploit', 'web-fingerprint'],
   },
   {
     id: 'exploit',
     name: '漏洞利用',
     description: '拿服务器权限并实测 WebShell 可连，建隧道并实测内网可达。',
-    skills: ['webshell-toolkit', 'credential-attack', 'redteam-authorization'],
+    skills: [
+      'webshell-toolkit',
+      'credential-attack',
+      'unauth-exploit',
+      'shell-handler',
+      'browser-automation',
+      'suo5-tunnel',
+      'chisel-tunnel',
+      'frp-tunnel',
+      'vps-reverse-shell',
+      'redteam-authorization',
+    ],
   },
   {
     id: 'internal',
     name: '内网渗透',
     description: '走既有隧道做 gogo 铺面 + fscan 打点，迭代挖出所有网段。',
-    skills: ['fscan-intranet'],
+    skills: ['fscan-intranet', 'gogo-intranet', 'lateral-movement', 'redteam-setup'],
   },
 ];
 
