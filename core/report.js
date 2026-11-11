@@ -3,7 +3,7 @@
 /**
  * 演练报告生成（Markdown）
  *
- * 只收录**有证据/已拿分**的成果（与 dsh-purge 的 score_report 口径一致）：
+ * 报告口径：**没证据不进报告**。
  * - 得分项：来自 scores（链步骤带 pointCode+evidence 时自动记分）
  * - 漏洞：只收 confirmed / exploited 状态
  * - 入口（WebShell/隧道/凭据）：全部列，但标注是否已核实

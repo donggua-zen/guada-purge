@@ -3,8 +3,8 @@
 /**
  * 红队资产库（JSON 版）
  *
- * 对齐 dsh-purge 的 redteam_* 语义，但存储换成单文件 JSON：
- * - 外部插件零依赖（不用 better-sqlite3 / node:sqlite，避免 ABI 与版本问题）
+ * 单文件 JSON 存储，零外部依赖：
+ * - 外部插件不用 better-sqlite3 / node:sqlite，避免 ABI 与版本差异
  * - 单演练几百条量级足够，且可直接用编辑器核对
  * - 原子写（tmp + rename），损坏时备份 .bad 后重置，不阻塞开工
  *
@@ -122,7 +122,7 @@ class RedteamDb {
     return data.engagements[id];
   }
 
-  /** 会话 → 当前演练（dsh-purge 的"靶标继承"语义） */
+  /** 会话 → 当前演练（靶标继承：子会话跟随父会话） */
   engagementOfSession(sessionId) {
     if (!sessionId) return null;
     const data = this.load();
@@ -368,7 +368,7 @@ class RedteamDb {
     return data.scores.filter((s) => !eng || s.eng === eng);
   }
 
-  // ── 派活占位（并发闸门，对齐 dsh-purge 的 redteam_agent_slot） ──
+  // ── 派活占位（并发闸门） ──
 
   /** 回收超出租约的占位（子代理崩溃时不会永久占名额） */
   pruneExpiredSlots(ttlMs) {

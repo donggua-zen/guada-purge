@@ -3,10 +3,11 @@
 /**
  * GuaDa Purge v2 —— 红队模式（PluginApi v4）
  *
- * 对齐 dsh-purge 的能力面（P1 阶段：单兵闭环）。
+ * 形态：能力包 + 专属智能体（指挥官 + 5 个隐藏执行角色）。
  *
  *   能力包 `redteam`（visibleTo: ["self"]）
- *     ├─ 资产库工具（engagement / asset / vuln / evidence / webshell / tunnel / credential / score）
+ *     ├─ 资产库/作战工具（engagement / asset / vuln / evidence / webshell / tunnel /
+ *     │   credential / score / chain / report / poc …）
  *     └─ 技能 skills/*.md（红队方法论）
  *   专属智能体「红队指挥官」（plugin-guada-purge-leader）
  *
@@ -31,14 +32,14 @@ const KIT_ID = 'redteam';
 const AGENT_ID = 'leader';
 const AGENT_NAME = '红队指挥官';
 
-/** 派活并发上限（对齐 dsh-purge 的"同一靶标最多 3 个执行智能体"） */
+/** 派活并发上限（同一靶标最多 3 个执行智能体） */
 const SLOT_MAX = 3;
 /** 占位租约：超时自动回收，避免子代理崩溃后名额不释放 */
 const SLOT_TTL_MS = 30 * 60 * 1000;
 
 /**
  * 执行角色（hidden：不出现在智能体列表/新建面板/@ 提及，只能被指挥官派活）。
- * skills 只列各自用得上的，省 token；工具不裁剪（对齐 dsh-purge：靠人设约束）。
+ * skills 只列各自用得上的，省 token；工具不强裁剪（靠人设约束分工）。
  */
 const ROLES = [
   {

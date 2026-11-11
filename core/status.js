@@ -1,12 +1,10 @@
 'use strict';
 
 /**
- * 状态分组（Phase 1/3 使用）
+ * 状态分组
  *
- * 与 dsh-purge 的补丁状态对齐：
+ * 把不同组件（persona/rules/skills/tools）归一成同一套展示状态：
  *   applied / already / skipped / failed
- * 这里不执行任何宿主补丁，只把插件自己的组件（persona/rules/skills/tools）
- * 归一成同一套展示状态。
  */
 
 const STATUS = {

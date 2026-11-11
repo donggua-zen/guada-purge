@@ -5,7 +5,7 @@
  *
  * 钉死的不是覆盖率，而是：
  * - 能力整包收口（visibleTo: self），不污染其它智能体
- * - 工具全集齐备且命名与 dsh-purge 对齐
+ * - 工具全集齐备、命名稳定（新增工具必须同步更新清单）
  * - 所有写操作都要求先开靶（未绑定时给出可执行提示）
  * - 证据链 claimed → observed 只能单向升级
  */
@@ -111,7 +111,7 @@ test('只注册一个能力包 + 1 个指挥官 + 5 个隐藏角色，无全局�
   });
 });
 
-test('工具全集与 dsh-purge 命名对齐', async () => {
+test('工具全集完整（新增工具需同步更新清单）', async () => {
   await withPlugin(async ({ api }) => {
     const names = api.handle.tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
@@ -475,7 +475,7 @@ test('靶标继承：子会话按 parentSessionId 落到父会话的演练', asy
 test('技能随能力包注册且内容非空', async () => {
   await withPlugin(async ({ api }) => {
     const names = api.handle.skills.map((s) => s.name).sort();
-    assert.ok(names.length >= 23, `技能数量应覆盖上游 23 条，实际 ${names.length}`);
+    assert.ok(names.length >= 23, `技能数量应覆盖设计清单（≥23），实际 ${names.length}`);
     for (const expected of [
       'credential-attack',
       'fofa-recon',
