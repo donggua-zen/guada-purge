@@ -49,6 +49,10 @@ const EMPTY = () => ({
   links: [],
   /** 截图/证据文件：{ id, eng, assetId, vulnId, path, note, createdAt } */
   shots: [],
+  /** 访问会话（横向移动起点）：{ id, eng, host, method, username, privilege, assetId, sessionRef, note, createdAt } */
+  accesses: [],
+  /** PoC/EXP 知识库：{ id, eng, code, title, kind, category, cve, component, versions, language, source, sourceUrl, content, tags, verified, verifiedNote, hitCount, createdAt, updatedAt } */
+  pocs: [],
 });
 
 class RedteamDb {
@@ -731,6 +735,209 @@ class RedteamDb {
     const removed = before - data.shots.length;
     if (removed > 0) this.save();
     return { removed };
+  }
+
+  // ── 访问会话（P3-4） ──
+
+  addAccess(input) {
+    const data = this.load();
+    const id = `K${Date.now().toString(36)}`;
+    const row = {
+      id,
+      eng: input.eng,
+      host: String(input.host || '').trim(),
+      method: String(input.method || 'unknown'),
+      username: input.username || '',
+      privilege: input.privilege || '',
+      assetId: input.assetId || '',
+      sessionRef: input.sessionRef || '',
+      note: input.note || '',
+      foundBy: input.foundBy || '',
+      createdAt: new Date().toISOString(),
+    };
+    data.accesses.push(row);
+    this.save();
+    return row;
+  }
+
+  listAccesses(eng) {
+    const data = this.load();
+    return data.accesses.filter((a) => !eng || a.eng === eng);
+  }
+
+  /** 列出全部演练（跨会话视图） */
+  listEngagements() {
+    const data = this.load();
+    return Object.values(data.engagements).map((e) => ({
+      ...e,
+      stats: {
+        assets: Object.values(data.assets).filter((a) => a.eng === e.id).length,
+        vulns: Object.values(data.vulns).filter((v) => v.eng === e.id).length,
+        chains: data.chains.filter((c) => c.eng === e.id).length,
+        scores: data.scores.filter((s) => s.eng === e.id).length,
+      },
+    }));
+  }
+
+  /** Web 资产（可直接访问的 URL / 带 http 的值） */
+  listWeb(eng, limit) {
+    const data = this.load();
+    const rows = Object.values(data.assets)
+      .filter((a) => a.eng === eng)
+      .filter(
+        (a) =>
+          a.kind === 'url' ||
+          a.kind === 'service' ||
+          /^https?:\/\//i.test(a.value) ||
+          (a.port === 80 || a.port === 443 || a.port === 8080 || a.port === 8443),
+      );
+    return limit ? rows.slice(0, Number(limit)) : rows;
+  }
+
+  /** 按域名聚合：主域 → 子域/资产 */
+  domainIndex(eng) {
+    const data = this.load();
+    const assets = Object.values(data.assets).filter((a) => a.eng === eng);
+    const map = new Map();
+    const baseOf = (value) => {
+      const host = String(value || '')
+        .replace(/^https?:\/\//i, '')
+        .split('/')[0]
+        .split(':')[0];
+      const parts = host.split('.');
+      if (parts.length <= 2) return host;
+      return parts.slice(-2).join('.');
+    };
+    for (const a of assets) {
+      const host = String(a.value || '').replace(/^https?:\/\//i, '').split('/')[0];
+      if (!host || /^\d+\.\d+\.\d+\.\d+$/.test(host)) continue;
+      const base = baseOf(host);
+      if (!map.has(base)) map.set(base, { domain: base, hosts: [], ips: new Set() });
+      const row = map.get(base);
+      if (!row.hosts.includes(host)) row.hosts.push(host);
+      if (a.ip) row.ips.add(a.ip);
+    }
+    return Array.from(map.values()).map((row) => ({
+      domain: row.domain,
+      hosts: row.hosts,
+      ips: Array.from(row.ips),
+      count: row.hosts.length,
+    }));
+  }
+
+  // ── PoC 知识库（P3-3） ──
+
+  addPoc(input) {
+    const data = this.load();
+    const code = String(input.code || '').trim();
+    if (!code) throw new Error('poc code is required');
+    if (data.pocs.some((p) => p.code === code)) {
+      throw new Error(`PoC code 已存在: ${code}（用 redteam_poc_update 修改）`);
+    }
+    const row = {
+      id: `POC-${Date.now().toString(36)}`,
+      eng: input.eng || null,
+      code,
+      title: String(input.title || code),
+      kind: input.kind || 'request',
+      category: input.category || '',
+      cve: input.cve || '',
+      component: input.component || '',
+      versions: input.versions || '',
+      language: input.language || '',
+      source: input.source || 'manual',
+      sourceUrl: input.sourceUrl || '',
+      content: input.content || '',
+      tags: Array.isArray(input.tags) ? input.tags : String(input.tags || '').split(',').map((s) => s.trim()).filter(Boolean),
+      verified: input.verified === true,
+      verifiedNote: input.verifiedNote || '',
+      hitCount: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    data.pocs.push(row);
+    this.save();
+    return row;
+  }
+
+  /** 列表（默认不含正文，省 token） */
+  listPocs(filter = {}) {
+    const data = this.load();
+    let rows = data.pocs.slice();
+    if (filter.kind) rows = rows.filter((p) => p.kind === filter.kind);
+    if (filter.category) rows = rows.filter((p) => p.category === filter.category);
+    if (filter.cve) rows = rows.filter((p) => p.cve.toLowerCase().includes(String(filter.cve).toLowerCase()));
+    if (filter.component) {
+      const q = String(filter.component).toLowerCase();
+      rows = rows.filter((p) => p.component.toLowerCase().includes(q));
+    }
+    if (filter.verifiedOnly) rows = rows.filter((p) => p.verified);
+    rows.sort((a, b) => b.hitCount - a.hitCount || String(b.createdAt).localeCompare(String(a.createdAt)));
+    return rows.map((p) => {
+      const { content, ...rest } = p;
+      return { ...rest, hasContent: Boolean(content) };
+    });
+  }
+
+  searchPocs(keyword) {
+    const q = String(keyword || '').trim().toLowerCase();
+    if (!q) return this.listPocs({});
+    const data = this.load();
+    return data.pocs
+      .filter((p) =>
+        [p.code, p.title, p.category, p.cve, p.component, p.content, (p.tags || []).join(',')]
+          .join(' ')
+          .toLowerCase()
+          .includes(q),
+      )
+      .map(({ content, ...rest }) => ({ ...rest, hasContent: Boolean(content) }));
+  }
+
+  getPoc(idOrCode) {
+    const data = this.load();
+    const key = String(idOrCode || '').trim();
+    return data.pocs.find((p) => p.id === key || p.code === key) || null;
+  }
+
+  updatePoc(idOrCode, patch) {
+    const data = this.load();
+    const row = this.getPoc(idOrCode);
+    if (!row) throw new Error(`PoC 不存在: ${idOrCode}`);
+    for (const key of [
+      'title',
+      'kind',
+      'category',
+      'cve',
+      'component',
+      'versions',
+      'language',
+      'source',
+      'sourceUrl',
+      'content',
+      'verifiedNote',
+    ]) {
+      if (patch?.[key] !== undefined) row[key] = patch[key];
+    }
+    if (patch?.tags !== undefined) {
+      row.tags = Array.isArray(patch.tags)
+        ? patch.tags
+        : String(patch.tags).split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (patch?.verified !== undefined) row.verified = patch.verified === true;
+    row.updatedAt = new Date().toISOString();
+    this.save();
+    return row;
+  }
+
+  /** 记一次复用（hitCount++），高复用条目排前面 */
+  usePoc(idOrCode, note) {
+    const row = this.getPoc(idOrCode);
+    if (!row) throw new Error(`PoC 不存在: ${idOrCode}`);
+    row.hitCount = (row.hitCount || 0) + 1;
+    row.lastUsedAt = new Date().toISOString();
+    if (note) row.lastUsedNote = String(note);
+    this.save();
+    return row;
   }
 }
 

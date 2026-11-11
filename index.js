@@ -25,7 +25,7 @@ const { probe } = require('./core/probe');
 const store = require('./core/store');
 
 const PLUGIN_ID = 'guada-purge';
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 
 const KIT_ID = 'redteam';
 const AGENT_ID = 'leader';
@@ -1183,6 +1183,208 @@ class GuadaPurgePlugin {
       },
       dangerLevel: 'normal',
       handler: async (args) => json(plugin.db.deleteShot(String(args?.id))),
+    });
+
+    // ── 访问会话 / 索引（P3-4） ──
+
+    tool({
+      name: 'redteam_access_add',
+      description:
+        '记录一次成功获得的访问会话（横向移动起点）：host + method（rdp/ssh/web-shell/db/vnc）+ 权限级别。',
+      parameters: {
+        type: 'object',
+        properties: {
+          host: { type: 'string', description: '目标主机' },
+          method: { type: 'string', description: '获得访问的方式：rdp/ssh/web-shell/db/vnc/web-account' },
+          username: { type: 'string' },
+          privilege: { type: 'string', description: 'admin/user/system/root' },
+          assetId: { type: 'string' },
+          sessionRef: { type: 'string', description: '会话/证据引用（文件或链接）' },
+          note: { type: 'string' },
+        },
+        required: ['host', 'method'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.addAccess({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_access_list',
+      description: '列出已获得的访问会话。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listAccesses(eng(ctx).id)),
+    });
+
+    tool({
+      name: 'redteam_sessions',
+      description: '列出全部演练（跨会话视图）：目标、绑定会话、资产/漏洞/链步骤/得分数量。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async () => json(plugin.db.listEngagements()),
+    });
+
+    tool({
+      name: 'redteam_session_check',
+      description: '检查当前会话的靶标绑定状态：直接绑定 / 从父会话继承 / 未绑定。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => {
+        const sessionId = ctx?.session?.sessionId || null;
+        const parentId = ctx?.session?.parentSessionId || null;
+        const direct = plugin.db.engagementOfSession(sessionId);
+        const inherited = parentId ? plugin.db.engagementOfSession(parentId) : null;
+        return json({
+          sessionId,
+          parentSessionId: parentId,
+          sessionType: ctx?.session?.sessionType || 'unknown',
+          agentId: ctx?.session?.agentId || null,
+          bound: direct || inherited || null,
+          source: direct ? 'direct' : inherited ? 'inherited' : 'none',
+        });
+      },
+    });
+
+    tool({
+      name: 'redteam_web_list',
+      description: '列出 Web 资产（URL / web 端口服务），做 Web 渗透前先看这里。',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'number', description: '最多返回条数' } },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => json(plugin.db.listWeb(eng(ctx).id, args?.limit)),
+    });
+
+    tool({
+      name: 'redteam_domain_index',
+      description: '按主域聚合资产：每个主域关联了哪些子域与 IP。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.domainIndex(eng(ctx).id)),
+    });
+
+    // ── PoC 知识库（P3-3） ──
+
+    tool({
+      name: 'redteam_poc_add',
+      description:
+        '把验证有效的 PoC/EXP 存进知识库（code 唯一）。' +
+        'kind=request（HTTP 报文）/ script（脚本）/ nuclei（模板路径）；带 component+cve 便于下次检索。',
+      parameters: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: '唯一短码，如 thinkphp-5-rce' },
+          title: { type: 'string' },
+          kind: { type: 'string', enum: ['request', 'script', 'nuclei'] },
+          category: { type: 'string', description: '分类，如 rce / unauth / lfi / sqli' },
+          cve: { type: 'string' },
+          component: { type: 'string', description: '受影响组件，如 ThinkPHP 5.0.x' },
+          versions: { type: 'string' },
+          language: { type: 'string', description: '脚本语言（script 类型时）' },
+          source: { type: 'string', description: '来源：manual/exploitdb/github' },
+          sourceUrl: { type: 'string' },
+          content: { type: 'string', description: '正文：原始请求 / 脚本 / 模板路径' },
+          tags: { type: 'string', description: '逗号分隔' },
+          verified: { type: 'boolean', description: '是否已实战验证' },
+          verifiedNote: { type: 'string', description: '验证说明（在哪个靶标/资产上成功）' },
+        },
+        required: ['code'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.addPoc({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_poc_list',
+      description: '列出 PoC 知识库（不含正文，按复用次数排序）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', description: 'request/script/nuclei' },
+          category: { type: 'string' },
+          component: { type: 'string', description: '组件名包含' },
+          cve: { type: 'string', description: 'CVE 包含' },
+          verifiedOnly: { type: 'boolean' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args) => json(plugin.db.listPocs(args || {})),
+    });
+
+    tool({
+      name: 'redteam_poc_search',
+      description: '按关键字搜索 PoC（标题/组件/CVE/标签/正文）。',
+      parameters: {
+        type: 'object',
+        properties: { keyword: { type: 'string' } },
+        required: ['keyword'],
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args) => json(plugin.db.searchPocs(args?.keyword)),
+    });
+
+    tool({
+      name: 'redteam_poc_get',
+      description: '取 PoC 全文（按 id 或 code）。',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: 'PoC id（POC-…）或 code' } },
+        required: ['id'],
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args) => {
+        const row = plugin.db.getPoc(args?.id);
+        if (!row) throw new Error(`PoC 不存在: ${args?.id}`);
+        return json(row);
+      },
+    });
+
+    tool({
+      name: 'redteam_poc_update',
+      description: '更新 PoC（改正文/组件/验证状态等）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'PoC id 或 code' },
+          title: { type: 'string' },
+          content: { type: 'string' },
+          component: { type: 'string' },
+          cve: { type: 'string' },
+          verified: { type: 'boolean' },
+          verifiedNote: { type: 'string' },
+          tags: { type: 'string' },
+        },
+        required: ['id'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) => {
+        const { id, ...patch } = args || {};
+        return json(plugin.db.updatePoc(String(id), patch));
+      },
+    });
+
+    tool({
+      name: 'redteam_poc_use',
+      description: '记一次 PoC 复用（命中次数 +1），高复用条目会排在列表前面。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'PoC id 或 code' },
+          note: { type: 'string', description: '用在哪（靶标/资产/结果）' },
+        },
+        required: ['id'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) => json(plugin.db.usePoc(String(args?.id), args?.note)),
     });
   }
 }

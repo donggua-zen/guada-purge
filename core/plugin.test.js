@@ -115,6 +115,8 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
   await withPlugin(async ({ api }) => {
     const names = api.handle.tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
+      'redteam_access_add',
+      'redteam_access_list',
       'redteam_agent_slot',
       'redteam_asset_add',
       'redteam_asset_assess',
@@ -133,12 +135,19 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_chain_add',
       'redteam_credential_add',
       'redteam_credential_list',
+      'redteam_domain_index',
       'redteam_engagement_open',
       'redteam_evidence_list',
       'redteam_evidence_record',
       'redteam_evidence_upgrade',
       'redteam_evidence_verify',
       'redteam_http_evidence_add',
+      'redteam_poc_add',
+      'redteam_poc_get',
+      'redteam_poc_list',
+      'redteam_poc_search',
+      'redteam_poc_update',
+      'redteam_poc_use',
       'redteam_preflight',
       'redteam_report',
       'redteam_report_targets',
@@ -147,7 +156,9 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_score_point_save',
       'redteam_score_report',
       'redteam_session_bind',
+      'redteam_session_check',
       'redteam_session_info',
+      'redteam_sessions',
       'redteam_shot_add',
       'redteam_shot_delete',
       'redteam_shot_list',
@@ -161,6 +172,7 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_vuln_add',
       'redteam_vuln_query',
       'redteam_vuln_update',
+      'redteam_web_list',
       'redteam_webshell_add',
       'redteam_webshell_list',
       'redteam_webshell_update',
@@ -814,5 +826,154 @@ test('资产连通性探测：不可达时返回 ok=false 而不是抛错', asyn
     assert.equal(result.ok, false);
     assert.ok(result.error);
     assert.equal(result.url, 'http://127.0.0.1:1');
+  });
+});
+
+test('PoC 知识库：新增 → 检索 → 取全文 → 复用计数 → 更新', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: 'POC 靶标' }, c);
+
+    const poc = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_poc_add').handler(
+          {
+            code: 'thinkphp-5-rce',
+            title: 'ThinkPHP 5.0.23 远程代码执行',
+            kind: 'request',
+            category: 'rce',
+            component: 'ThinkPHP 5.0.x',
+            cve: 'CVE-2018-20062',
+            content: 'GET /index.php?s=/index/\\think\\app/invokefunction&function=call_user_func_array&vars[0]=phpinfo',
+            tags: 'php,rce,thinkphp',
+            verified: true,
+            verifiedNote: '在 A1 上拿到 phpinfo',
+          },
+          c,
+        )
+      ).content,
+    );
+    assert.match(poc.id, /^POC-/);
+    assert.equal(poc.verified, true);
+
+    // code 唯一
+    await assert.rejects(
+      () =>
+        Promise.resolve(
+          toolNamed(api, 'redteam_poc_add').handler({ code: 'thinkphp-5-rce' }, c),
+        ),
+      /已存在/,
+    );
+
+    const list = JSON.parse(
+      (await toolNamed(api, 'redteam_poc_list').handler({}, c)).content,
+    );
+    assert.equal(list.length, 1);
+    assert.equal(list[0].hasContent, true);
+    assert.equal(list[0].content, undefined, '列表不应返回正文');
+
+    const byComponent = JSON.parse(
+      (await toolNamed(api, 'redteam_poc_list').handler({ component: 'thinkphp' }, c)).content,
+    );
+    assert.equal(byComponent.length, 1);
+
+    const found = JSON.parse(
+      (await toolNamed(api, 'redteam_poc_search').handler({ keyword: 'phpinfo' }, c)).content,
+    );
+    assert.equal(found.length, 1);
+
+    const full = JSON.parse(
+      (await toolNamed(api, 'redteam_poc_get').handler({ id: 'thinkphp-5-rce' }, c)).content,
+    );
+    assert.match(full.content, /invokefunction/);
+
+    await toolNamed(api, 'redteam_poc_use').handler(
+      { id: 'thinkphp-5-rce', note: '用在 A1' },
+      c,
+    );
+    await toolNamed(api, 'redteam_poc_use').handler({ id: poc.id }, c);
+    const afterUse = JSON.parse(
+      (await toolNamed(api, 'redteam_poc_get').handler({ id: poc.id }, c)).content,
+    );
+    assert.equal(afterUse.hitCount, 2);
+    assert.equal(afterUse.lastUsedNote, '用在 A1');
+
+    const updated = JSON.parse(
+      (await toolNamed(api, 'redteam_poc_update').handler(
+        { id: poc.id, title: '改过的标题', verifiedNote: '换资产复测通过' },
+        c,
+      )).content,
+    );
+    assert.equal(updated.title, '改过的标题');
+  });
+});
+
+test('访问会话 / 演练总览 / 会话检查 / Web 资产 / 域名索引', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler(
+      { name: '索引靶标', scope: 'example.com' },
+      c,
+    );
+
+    await toolNamed(api, 'redteam_asset_add').handler(
+      { kind: 'url', value: 'https://admin.example.com:8443/login', ip: '1.2.3.4' },
+      c,
+    );
+    await toolNamed(api, 'redteam_asset_add').handler(
+      { kind: 'domain', value: 'api.example.com', ip: '1.2.3.5' },
+      c,
+    );
+    await toolNamed(api, 'redteam_asset_add').handler(
+      { kind: 'host', value: '10.0.0.9' },
+      c,
+    );
+
+    const access = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_access_add').handler(
+          { host: 'admin.example.com', method: 'web-shell', username: 'www-data', privilege: 'user' },
+          c,
+        )
+      ).content,
+    );
+    assert.match(access.id, /^K/);
+
+    const accesses = JSON.parse(
+      (await toolNamed(api, 'redteam_access_list').handler({}, c)).content,
+    );
+    assert.equal(accesses.length, 1);
+    assert.equal(accesses[0].method, 'web-shell');
+
+    const sessions = JSON.parse(
+      (await toolNamed(api, 'redteam_sessions').handler({}, c)).content,
+    );
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].stats.assets, 3);
+
+    const check = JSON.parse(
+      (await toolNamed(api, 'redteam_session_check').handler({}, c)).content,
+    );
+    assert.equal(check.source, 'direct');
+    assert.ok(check.bound);
+
+    // 子会话视角：继承
+    const childCtx = { session: { sessionId: 'sess-child', parentSessionId: 'session-test' } };
+    const childCheck = JSON.parse(
+      (await toolNamed(api, 'redteam_session_check').handler({}, childCtx)).content,
+    );
+    assert.equal(childCheck.source, 'inherited');
+
+    const web = JSON.parse((await toolNamed(api, 'redteam_web_list').handler({}, c)).content);
+    assert.equal(web.length, 1);
+    assert.match(web[0].value, /^https:/);
+
+    const domains = JSON.parse(
+      (await toolNamed(api, 'redteam_domain_index').handler({}, c)).content,
+    );
+    assert.equal(domains.length, 1);
+    assert.equal(domains[0].domain, 'example.com');
+    assert.equal(domains[0].hosts.length, 2);
+    assert.deepEqual(domains[0].ips.sort(), ['1.2.3.4', '1.2.3.5']);
   });
 });

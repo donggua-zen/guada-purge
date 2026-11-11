@@ -1,7 +1,7 @@
 {
   "id": "guada-purge",
   "name": "GuaDa Purge",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "红队模式 —— 专属智能体 + 资产库 + 方法论技能（不修改宿主、不绕过安全策略）",
   "author": "donggua-zen",
   "category": "user",
