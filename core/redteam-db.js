@@ -37,6 +37,14 @@ const EMPTY = () => ({
   scores: [],
   /** 派活占位（并发闸门）：{ eng, role, sessionId, acquiredAt } */
   slots: [],
+  /** 攻击链步骤：{ id, eng, seq, stage, stageCode, title, detail, tool, result, assetId, vulnId, accessId, pointCode, evidence, selfCreated, createdAt } */
+  chains: [],
+  /** 自定义得分点（覆盖内置默认）：{ eng|null, code, name, points } */
+  scorePoints: [],
+  /** 攻击文件/产出：{ id, eng, name, kind, path, note, createdAt } */
+  attackFiles: [],
+  /** 未知资产（看到了但说不清）：{ id, eng, value, note, status, resolvedAs, createdAt } */
+  unknowns: [],
 });
 
 class RedteamDb {
@@ -338,6 +346,8 @@ class RedteamDb {
       eng: input.eng,
       point: String(input.point || '').trim() || '未命名得分点',
       note: input.note || '',
+      chainId: input.chainId || '',
+      selfCreated: input.selfCreated === true,
       createdAt: new Date().toISOString(),
     };
     data.scores.push(row);
@@ -413,6 +423,146 @@ class RedteamDb {
     const released = before - data.slots.length;
     if (released > 0) this.save();
     return { released, remaining: data.slots.filter((s) => s.eng === eng).length };
+  }
+
+  // ── 攻击链 ──
+
+  /**
+   * 记录一个攻击链步骤。
+   *
+   * `tool`（实际命令原文）与 `result`（实际回显）是报告能复现的关键，
+   * 落库时不做校验（模型可能先占位后补），由报告生成时提示缺失项。
+   */
+  addChain(input) {
+    const data = this.load();
+    const seq = (data.chains.filter((c) => c.eng === input.eng).length || 0) + 1;
+    const row = {
+      id: `C${Date.now().toString(36)}${seq}`,
+      eng: input.eng,
+      seq,
+      stage: input.stage || 'other',
+      stageCode: input.stageCode || '',
+      title: String(input.title || '').trim() || '未命名步骤',
+      detail: input.detail || '',
+      tool: input.tool || '',
+      result: input.result || '',
+      assetId: input.assetId || '',
+      vulnId: input.vulnId || '',
+      accessId: input.accessId || '',
+      pointCode: input.pointCode || '',
+      evidence: input.evidence || '',
+      selfCreated: input.selfCreated === true,
+      recordedBy: input.recordedBy || '',
+      createdAt: new Date().toISOString(),
+    };
+    data.chains.push(row);
+    this.save();
+
+    // 带得分点 + 证据 → 顺带记一次分（与 dsh 的"步骤与得分互挂"一致）
+    let score = null;
+    if (row.pointCode && row.evidence) {
+      score = this.hitScore({
+        eng: row.eng,
+        point: row.pointCode,
+        note: row.evidence,
+        chainId: row.id,
+        selfCreated: row.selfCreated,
+      });
+    }
+    return { ...row, score };
+  }
+
+  listChains(eng, filter = {}) {
+    const data = this.load();
+    let rows = data.chains.filter((c) => !eng || c.eng === eng);
+    if (filter.stageCode) rows = rows.filter((c) => c.stageCode === filter.stageCode);
+    return rows.slice().sort((a, b) => a.seq - b.seq);
+  }
+
+  // ── 得分点定义（覆盖内置默认） ──
+
+  saveScorePoint({ eng, code, name, points }) {
+    const data = this.load();
+    const key = String(code || '').trim();
+    if (!key) throw new Error('score point code is required');
+    const existing = data.scorePoints.find(
+      (p) => p.code === key && (p.eng || null) === (eng || null),
+    );
+    const row = {
+      eng: eng || null,
+      code: key,
+      name: String(name || key),
+      points: Number(points) || 0,
+    };
+    if (existing) Object.assign(existing, row);
+    else data.scorePoints.push(row);
+    this.save();
+    return row;
+  }
+
+  listScorePoints(eng) {
+    const data = this.load();
+    return data.scorePoints.filter((p) => !p.eng || p.eng === eng);
+  }
+
+  // ── 攻击文件（报告/脚本/导出物） ──
+
+  addAttackFile(input) {
+    const data = this.load();
+    const id = `F${Date.now().toString(36)}`;
+    const row = {
+      id,
+      eng: input.eng,
+      name: String(input.name || '').trim() || '未命名文件',
+      kind: input.kind || 'other',
+      path: input.path || '',
+      note: input.note || '',
+      createdAt: new Date().toISOString(),
+    };
+    data.attackFiles.push(row);
+    this.save();
+    return row;
+  }
+
+  listAttackFiles(eng) {
+    const data = this.load();
+    return data.attackFiles.filter((f) => !eng || f.eng === eng);
+  }
+
+  // ── 未知资产 ──
+
+  recordUnknown(input) {
+    const data = this.load();
+    const id = `U${Date.now().toString(36)}`;
+    const row = {
+      id,
+      eng: input.eng,
+      value: String(input.value || '').trim(),
+      note: input.note || '',
+      status: 'open',
+      resolvedAs: '',
+      createdAt: new Date().toISOString(),
+    };
+    data.unknowns.push(row);
+    this.save();
+    return row;
+  }
+
+  listUnknowns(eng, filter = {}) {
+    const data = this.load();
+    let rows = data.unknowns.filter((u) => !eng || u.eng === eng);
+    if (filter.status) rows = rows.filter((u) => u.status === filter.status);
+    return rows;
+  }
+
+  resolveUnknown(id, resolvedAs) {
+    const data = this.load();
+    const row = data.unknowns.find((u) => u.id === id);
+    if (!row) throw new Error(`未知资产不存在: ${id}`);
+    row.status = 'resolved';
+    row.resolvedAs = String(resolvedAs || '');
+    this.save();
+    return row;
   }
 }
 

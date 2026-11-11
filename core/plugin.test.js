@@ -120,6 +120,12 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_asset_assess',
       'redteam_asset_query',
       'redteam_asset_stats',
+      'redteam_attack_chain',
+      'redteam_attack_file_add',
+      'redteam_attack_file_list',
+      'redteam_attack_path',
+      'redteam_chain',
+      'redteam_chain_add',
       'redteam_credential_add',
       'redteam_credential_list',
       'redteam_engagement_open',
@@ -127,12 +133,19 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_evidence_record',
       'redteam_evidence_upgrade',
       'redteam_preflight',
+      'redteam_report',
+      'redteam_report_targets',
       'redteam_score_hit',
       'redteam_score_list',
+      'redteam_score_point_save',
+      'redteam_score_report',
       'redteam_session_bind',
       'redteam_session_info',
       'redteam_tunnel_add',
       'redteam_tunnel_list',
+      'redteam_unknown_list',
+      'redteam_unknown_record',
+      'redteam_unknown_resolve',
       'redteam_unverified_count',
       'redteam_vuln_add',
       'redteam_vuln_query',
@@ -460,5 +473,167 @@ test('preflight 返回环境与工具检查结果', async () => {
     assert.ok(Array.isArray(result.tools));
     assert.ok(result.env.some((item) => item.key === 'FOFA_KEY'));
     assert.equal(typeof result.ready, 'boolean');
+  });
+});
+
+test('攻击链 + 报告：链步骤自动记分，报告含关键段落', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler(
+      { name: '报告靶标', scope: 'example.com' },
+      c,
+    );
+
+    const asset = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_asset_add').handler(
+          { kind: 'host', value: '1.2.3.4', surface: 'nginx/1.20 ThinkPHP' },
+          c,
+        )
+      ).content,
+    );
+
+    const vuln = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_vuln_add').handler(
+          {
+            assetId: asset.id,
+            title: 'ThinkPHP RCE',
+            level: 'critical',
+            status: 'confirmed',
+            request: 'GET /index.php?s=/index/\\think\\app/invokefunction&function=phpinfo',
+          },
+          c,
+        )
+      ).content,
+    );
+
+    const chain = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_chain_add').handler(
+          {
+            stageCode: 'boundary',
+            title: '上传冰蝎马拿到 shell',
+            detail: '后台模板上传点可写 jsp',
+            tool: 'curl -X POST http://1.2.3.4/upload -F file=@shell.jsp',
+            result: 'uid=0(root) gid=0(root)',
+            assetId: asset.id,
+            vulnId: vuln.id,
+            pointCode: 'webshell',
+            evidence: 'A1 上拿到 www-data webshell，curl 实测可执行命令',
+          },
+          c,
+        )
+      ).content,
+    );
+
+    assert.equal(chain.seq, 1);
+    assert.ok(chain.score, '带 pointCode + evidence 应自动记分');
+
+    const report = JSON.parse(
+      (await toolNamed(api, 'redteam_score_report').handler({}, c)).content,
+    );
+    assert.equal(report.summary.totalPoints, 30);
+    assert.equal(report.summary.chainSteps, 1);
+    assert.match(report.markdown, /# 报告靶标 · 红队演练报告/);
+    assert.match(report.markdown, /## 二、得分明细/);
+    assert.match(report.markdown, /## 三、攻击链/);
+    assert.match(report.markdown, /边界突破/);
+    assert.match(report.markdown, /ThinkPHP RCE/);
+    assert.match(report.markdown, /## 九、修复建议/);
+
+    // 只要摘要
+    const brief = JSON.parse(
+      (await toolNamed(api, 'redteam_score_report').handler({ markdown: false }, c)).content,
+    );
+    assert.equal(brief.markdown, undefined);
+    assert.equal(brief.summary.assets, 1);
+
+    // 按资产看路径
+    const path = JSON.parse(
+      (await toolNamed(api, 'redteam_attack_path').handler({ assetId: asset.id }, c)).content,
+    );
+    assert.equal(path.chains.length, 1);
+    assert.equal(path.vulns.length, 1);
+  });
+});
+
+test('自定义得分点覆盖内置分值', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '评分靶标' }, c);
+    await toolNamed(api, 'redteam_score_point_save').handler(
+      { code: 'webshell', name: '拿马', points: 99 },
+      c,
+    );
+    await toolNamed(api, 'redteam_score_hit').handler(
+      { point: 'webshell', note: '测试分值覆盖' },
+      c,
+    );
+    const brief = JSON.parse(
+      (await toolNamed(api, 'redteam_score_report').handler({ markdown: false }, c)).content,
+    );
+    assert.equal(brief.summary.totalPoints, 99);
+  });
+});
+
+test('未知资产：登记 → 未解决列表 → 解决', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '未知靶标' }, c);
+
+    const u = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_unknown_record').handler(
+          { value: '10.0.0.5:8888 返回 500', note: '像是内部管理台' },
+          c,
+        )
+      ).content,
+    );
+
+    let open = JSON.parse(
+      (await toolNamed(api, 'redteam_unknown_list').handler({}, c)).content,
+    );
+    assert.equal(open.length, 1);
+
+    await toolNamed(api, 'redteam_unknown_resolve').handler(
+      { id: u.id, resolvedAs: '内网 Jenkins' },
+      c,
+    );
+
+    open = JSON.parse((await toolNamed(api, 'redteam_unknown_list').handler({}, c)).content);
+    assert.equal(open.length, 0);
+
+    const resolved = JSON.parse(
+      (await toolNamed(api, 'redteam_unknown_list').handler({ status: 'resolved' }, c)).content,
+    );
+    assert.equal(resolved.length, 1);
+    assert.equal(resolved[0].resolvedAs, '内网 Jenkins');
+  });
+});
+
+test('report_targets 按资产汇总成果', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '汇总靶标' }, c);
+    const a = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_add').handler({ value: 'a.example.com' }, c)).content,
+    );
+    await toolNamed(api, 'redteam_vuln_add').handler(
+      { assetId: a.id, title: 'v1', level: 'high' },
+      c,
+    );
+    await toolNamed(api, 'redteam_chain_add').handler(
+      { title: '探测', assetId: a.id, tool: 'curl', result: '200' },
+      c,
+    );
+
+    const targets = JSON.parse(
+      (await toolNamed(api, 'redteam_report_targets').handler({}, c)).content,
+    );
+    assert.equal(targets.totals.targets, 1);
+    assert.equal(targets.totals.vulns, 1);
+    assert.equal(targets.targets[0].vulns, 1);
+    assert.equal(targets.targets[0].chains, 1);
   });
 });

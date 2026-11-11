@@ -8,17 +8,30 @@
 
 ---
 
-## 现在有什么（P2）
+## 现在有什么（P3-1）
 
 | 类别 | 内容 |
 |---|---|
 | 智能体 | **6 个**：`红队指挥官`（可见）+ 5 个执行角色（隐藏：信息收集 / 资产梳理 / 漏洞发现 / 漏洞利用 / 内网渗透） |
-| 工具 | **23 个** `redteam_*`：开靶/绑靶、资产增查统计评估、漏洞登记与查重、证据链（claimed→observed）、WebShell、隧道、凭据、得分点、环境预检、**派活并发闸门** |
+| 工具 | **36 个** `redteam_*`：开靶/绑靶、资产增查统计评估、漏洞登记与查重、证据链、WebShell、隧道、凭据、得分点、环境预检、派活闸门、**攻击链**、**Markdown 报告**、**未知资产** |
 | 技能 | **7 条**：`recon-pipeline` / `fofa-recon` / `nuclei-scan` / `webshell-toolkit` / `fscan-intranet` / `credential-attack` / `redteam-authorization` |
 | 资产库 | `$USERDATA/plugins-data/guada-purge/redteam.json`（零依赖 JSON，可直接看） |
 
 对照上游 [dsh-purge](https://github.com/HunYiSage/dsh-purge)：64 个工具 / 23 条技能 / 6 角色。
-当前覆盖约 **2/3**（工具 23/64，技能 7/23，角色 6/6），剩余见文末路线图。
+当前覆盖：工具 **36/64**、技能 7/23、角色 6/6。
+
+### 报告能力（P3-1 新增）
+
+```
+redteam_chain_add      记录攻击链步骤（tool=命令原文，result=回显）
+redteam_score_report   生成 Markdown 报告（只收录有证据/已拿分的成果）
+redteam_report_targets 按资产汇总"哪个目标还缺什么"
+redteam_unknown_*      暂时说不清的资产先挂着，不丢
+```
+
+报告结构：执行摘要 → 得分明细 → 攻击链（按阶段）→ 成果漏洞（附原始请求）→ 入口与凭据 → 内网资产 → 未决事项 → 修复建议。
+
+得分点内置：`rce 50` / `webshell 30` / `boundary 40` / `internal-pivot 40` / `web-account-admin 20` / `web-account-user 10` / `db-access 20` / `sensitive-data 20` / `core-system 60`，可用 `redteam_score_point_save` 覆盖。
 
 ## 安装
 
@@ -87,8 +100,12 @@
 | 期 | 内容 |
 |---|---|
 | P1 ✅ | 单兵闭环：22 工具 + 7 技能 + 资产库 |
-| **P2 ✅（当前）** | 5 个执行角色 + 指挥官派活 + 并发闸门（≤3）+ 靶标继承 + 角色隐藏 |
-| P3 | 剩余 ~41 个工具（PoC 库、攻击链、报告生成、资产图谱、时间线、未知资产）+ 剩余 16 条技能 |
+| P2 ✅ | 5 个执行角色 + 指挥官派活 + 并发闸门（≤3）+ 靶标继承 + 角色隐藏 |
+| **P3-1 ✅（当前）** | 攻击链 + Markdown 报告 + 未知资产（13 个工具，共 36） |
+| P3-2 | 资产深挖（图谱/时间线/连通测试）+ 更新类 + 证据补充 + 截图（13 个工具） |
+| P3-3 | PoC 库（6 个工具） |
+| P3-4 | 凭据/会话/索引（6 个工具） |
+| P3-5 | 剩余 17 条技能 |
 
 ## 目录结构
 

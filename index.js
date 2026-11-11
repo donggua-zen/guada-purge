@@ -20,10 +20,11 @@ const os = require('node:os');
 const { RedteamDb } = require('./core/redteam-db');
 const { loadSkills } = require('./core/skills');
 const { runPreflight } = require('./core/preflight');
+const { buildReport, buildTargets } = require('./core/report');
 const store = require('./core/store');
 
 const PLUGIN_ID = 'guada-purge';
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 
 const KIT_ID = 'redteam';
 const AGENT_ID = 'leader';
@@ -668,6 +669,242 @@ class GuadaPurgePlugin {
       dangerLevel: 'safe',
       readOnly: true,
       handler: async (_args, ctx) => json(plugin.db.listScores(eng(ctx).id)),
+    });
+
+    // ── 攻击链 ──
+
+    tool({
+      name: 'redteam_chain_add',
+      description:
+        '记录一个攻击链步骤。报告里「这一步怎么来的」完全靠这条记录：' +
+        'tool 写实际命令原文、result 写实际回显、detail 写依据。' +
+        '带 pointCode + evidence 时会自动记一次分。',
+      parameters: {
+        type: 'object',
+        properties: {
+          stageCode: {
+            type: 'string',
+            enum: ['recon', 'internet', 'boundary', 'internal', 'target'],
+            description: '作战阶段：信息收集/互联网权限/边界突破/内网权限/靶标系统',
+          },
+          stage: {
+            type: 'string',
+            enum: ['recon', 'vuln', 'exploit', 'access', 'pivot', 'data', 'other'],
+            description: '动作类型（兼容字段，阶段归属优先用 stageCode）',
+          },
+          title: { type: 'string', description: '一句话说明这一步做了什么' },
+          detail: { type: 'string', description: '为什么这么做、线索从哪来' },
+          tool: { type: 'string', description: '实际执行的命令原文（报告复现的关键）' },
+          result: { type: 'string', description: '实际回显/结果摘要（报告复现的关键）' },
+          assetId: { type: 'string', description: '关联资产 id' },
+          vulnId: { type: 'string', description: '关联漏洞 id' },
+          accessId: { type: 'string', description: '关联入口 id（webshell/tunnel）' },
+          pointCode: { type: 'string', description: '拿了分才填：得分点 code（如 rce/webshell/boundary）' },
+          evidence: { type: 'string', description: '配合 pointCode：这一分拿到了什么（不填不记分）' },
+          selfCreated: { type: 'boolean', description: '账号/权限是自己注册或自建的吗' },
+        },
+        required: ['title'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        return json(plugin.db.addChain({ ...args, eng: current.id }));
+      },
+    });
+
+    tool({
+      name: 'redteam_attack_chain',
+      description: '列出攻击链步骤（按 seq 排序，可按阶段过滤）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          stageCode: { type: 'string', description: '只看某个阶段' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => json(plugin.db.listChains(eng(ctx).id, args || {})),
+    });
+
+    tool({
+      name: 'redteam_attack_path',
+      description: '按资产看攻击路径：该资产上走过的链步骤 + 关联漏洞 + 得分点。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string', description: '资产 id；省略则返回全部资产的分组概览' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        const chains = plugin.db.listChains(current.id);
+        const vulns = plugin.db.queryVulns(current.id);
+        if (args?.assetId) {
+          const id = String(args.assetId);
+          return json({
+            assetId: id,
+            chains: chains.filter((c) => c.assetId === id),
+            vulns: vulns.filter((v) => v.assetId === id),
+          });
+        }
+        const ids = new Set([...chains.map((c) => c.assetId), ...vulns.map((v) => v.assetId)].filter(Boolean));
+        return json(
+          Array.from(ids).map((id) => ({
+            assetId: id,
+            chains: chains.filter((c) => c.assetId === id).length,
+            vulns: vulns.filter((v) => v.assetId === id).length,
+            points: chains.filter((c) => c.assetId === id && c.pointCode).map((c) => c.pointCode),
+          })),
+        );
+      },
+    });
+
+    tool({
+      name: 'redteam_chain',
+      description: '（兼容别名）同 redteam_attack_chain。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listChains(eng(ctx).id)),
+    });
+
+    tool({
+      name: 'redteam_attack_file_add',
+      description: '登记一个攻击文件/产出（报告、脚本、导出、dump）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '文件名/标题' },
+          kind: { type: 'string', enum: ['report', 'script', 'dump', 'screenshot', 'other'] },
+          path: { type: 'string', description: '路径或引用' },
+          note: { type: 'string', description: '说明' },
+        },
+        required: ['name'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.addAttackFile({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_attack_file_list',
+      description: '列出攻击文件/产出。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listAttackFiles(eng(ctx).id)),
+    });
+
+    // ── 报告 ──
+
+    tool({
+      name: 'redteam_score_point_save',
+      description: '自定义得分点分值（覆盖内置表）。内置：rce 50 / webshell 30 / boundary 40 / internal-pivot 40 / web-account-admin 20 / web-account-user 10 / db-access 20 / sensitive-data 20 / core-system 60。',
+      parameters: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: '得分点 code' },
+          name: { type: 'string', description: '显示名' },
+          points: { type: 'number', description: '分值' },
+        },
+        required: ['code'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) =>
+        json(plugin.db.saveScorePoint({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_score_report',
+      description:
+        '生成演练报告（Markdown）。只收录有证据/已拿分的成果；' +
+        '含概览、得分明细、攻击链、成果漏洞（附原始请求）、入口与凭据、内网、未决事项、修复建议。',
+      parameters: {
+        type: 'object',
+        properties: {
+          markdown: { type: 'boolean', description: 'true（默认）= 返回 markdown 全文；false = 只返回摘要' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        const result = buildReport(plugin.db, current);
+        if (args?.markdown === false) {
+          return json({ ok: true, engagement: current.id, summary: result.summary });
+        }
+        return json({ ok: true, engagement: current.id, summary: result.summary, markdown: result.markdown });
+      },
+    });
+
+    tool({
+      name: 'redteam_report',
+      description: '（已弃用，改用 redteam_score_report）生成成果报告，等价于 score_report。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => {
+        const current = eng(ctx);
+        const result = buildReport(plugin.db, current);
+        return json({ ok: true, engagement: current.id, deprecated: true, summary: result.summary, markdown: result.markdown });
+      },
+    });
+
+    tool({
+      name: 'redteam_report_targets',
+      description: '按资产汇总成果（漏洞数/链步骤数/等级分布），用于看"哪个目标还缺什么"。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(buildTargets(plugin.db, eng(ctx))),
+    });
+
+    // ── 未知资产 ──
+
+    tool({
+      name: 'redteam_unknown_record',
+      description: '登记一条"看到了但说不清是什么"的资产，先挂着不丢，后续再解决。',
+      parameters: {
+        type: 'object',
+        properties: {
+          value: { type: 'string', description: '看到了什么（URL/IP/指纹/报错）' },
+          note: { type: 'string', description: '为什么拿不准' },
+        },
+        required: ['value'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.recordUnknown({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_unknown_list',
+      description: '列出未知资产（默认只看未解决的）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', enum: ['open', 'resolved'], description: '默认 open' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) =>
+        json(plugin.db.listUnknowns(eng(ctx).id, { status: args?.status || 'open' })),
+    });
+
+    tool({
+      name: 'redteam_unknown_resolve',
+      description: '解决一条未知资产：说明它最终被判定为什么。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '未知资产 id（U...）' },
+          resolvedAs: { type: 'string', description: '最终结论（是哪个系统的什么）' },
+        },
+        required: ['id'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) => json(plugin.db.resolveUnknown(args?.id, args?.resolvedAs)),
     });
   }
 }
