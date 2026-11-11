@@ -86,14 +86,28 @@ async function withPlugin(fn) {
 const ctx = () => ({ session: { sessionId: 'session-test' } });
 const toolNamed = (api, name) => api.handle.tools.find((t) => t.name === name);
 
-test('只注册一个能力包 + 一个专属智能体，无全局注册', async () => {
+test('只注册一个能力包 + 1 个指挥官 + 5 个隐藏角色，无全局注册', async () => {
   await withPlugin(async ({ api }) => {
     assert.equal(api.calls.kits.length, 1);
-    assert.equal(api.calls.agents.length, 1);
+    assert.equal(api.calls.agents.length, 6);
     assert.deepEqual(api.calls.globals, []);
     assert.deepEqual(api.calls.kits[0].visibleTo, ['self']);
     assert.equal(api.calls.kits[0].id, 'redteam');
     assert.equal(api.calls.kits[0].loadMode, 'eager');
+
+    const leader = api.calls.agents.find((a) => a.id === 'leader');
+    const roles = api.calls.agents.filter((a) => a.id !== 'leader');
+    assert.ok(leader);
+    assert.notEqual(leader.hidden, true, '指挥官必须可见');
+    assert.deepEqual(
+      roles.map((r) => r.id).sort(),
+      ['assess', 'exploit', 'internal', 'recon', 'vuln-scan'],
+    );
+    for (const role of roles) {
+      assert.equal(role.hidden, true, `${role.id} 必须是 hidden`);
+      // 叶子节点：不声明 agents（不能派活）
+      assert.equal(role.agents, undefined, `${role.id} 不应能派活`);
+    }
   });
 });
 
@@ -101,6 +115,7 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
   await withPlugin(async ({ api }) => {
     const names = api.handle.tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
+      'redteam_agent_slot',
       'redteam_asset_add',
       'redteam_asset_assess',
       'redteam_asset_query',
@@ -293,12 +308,14 @@ test('不同会话的靶标互不干扰', async () => {
   }
 });
 
-test('专属智能体声明能力白名单，人设来自 presets/persona.md', async () => {
+test('指挥官声明能力白名单与可派角色，人设来自 presets/persona.md', async () => {
   await withPlugin(async ({ api }) => {
-    const agent = api.calls.agents[0];
-    assert.equal(agent.id, 'leader');
+    const agent = api.calls.agents.find((a) => a.id === 'leader');
     assert.equal(agent.name, '红队指挥官');
-    assert.deepEqual(agent.toolkits, ['redteam']);
+    // 工具包：自己的 redteam + sub_agent（派活）
+    assert.deepEqual(agent.toolkits, ['redteam', 'sub_agent:subagent']);
+    // 可派角色
+    assert.deepEqual(agent.agents, ['recon', 'assess', 'vuln-scan', 'exploit', 'internal']);
     assert.ok(agent.skills.length >= 6);
     for (const name of agent.skills) {
       assert.equal(name, name.toLowerCase());
@@ -306,6 +323,112 @@ test('专属智能体声明能力白名单，人设来自 presets/persona.md', a
     assert.ok(agent.systemPrompt.length > 200);
     assert.match(agent.systemPrompt, /红队/);
   });
+});
+
+test('执行角色各有独立人设与技能白名单', async () => {
+  await withPlugin(async ({ api }) => {
+    const byId = new Map(api.calls.agents.map((a) => [a.id, a]));
+    assert.deepEqual(byId.get('recon').skills, [
+      'recon-pipeline',
+      'fofa-recon',
+      'redteam-authorization',
+    ]);
+    assert.deepEqual(byId.get('internal').skills, ['fscan-intranet']);
+    assert.ok(byId.get('exploit').skills.includes('webshell-toolkit'));
+    for (const id of ['recon', 'assess', 'vuln-scan', 'exploit', 'internal']) {
+      const role = byId.get(id);
+      assert.ok(role.systemPrompt.length > 200, `${id} 人设过短`);
+      assert.deepEqual(role.toolkits, ['redteam'], `${id} 应共享 redteam 包`);
+    }
+  });
+});
+
+test('并发闸门：3 个占位后第 4 个被拒，release 后可再占', async () => {
+  await withPlugin(async ({ api }) => {
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '闸门靶标' }, ctx());
+    const slot = toolNamed(api, 'redteam_agent_slot');
+
+    for (const role of ['recon', 'assess', 'vuln-scan']) {
+      const res = JSON.parse(
+        (await slot.handler({ action: 'acquire', role }, ctx())).content,
+      );
+      assert.equal(res.ok, true, `${role} 应占位成功`);
+    }
+
+    const fourth = JSON.parse(
+      (await slot.handler({ action: 'acquire', role: 'exploit' }, ctx())).content,
+    );
+    assert.equal(fourth.ok, false);
+    assert.equal(fourth.reason, 'full');
+
+    const status = JSON.parse((await slot.handler({ action: 'status' }, ctx())).content);
+    assert.equal(status.used, 3);
+    assert.equal(status.max, 3);
+
+    const released = JSON.parse(
+      (await slot.handler({ action: 'release', role: 'recon' }, ctx())).content,
+    );
+    assert.equal(released.released, 1);
+
+    const retry = JSON.parse(
+      (await slot.handler({ action: 'acquire', role: 'exploit' }, ctx())).content,
+    );
+    assert.equal(retry.ok, true);
+  });
+});
+
+test('超时占位被自动回收', async () => {
+  await withPlugin(async ({ api, plugin }) => {
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '租约靶标' }, ctx());
+    const slot = toolNamed(api, 'redteam_agent_slot');
+    await slot.handler({ action: 'acquire', role: 'recon' }, ctx());
+
+    // 把占位时间改成 31 分钟前（超过 30 分钟租约）
+    const data = plugin.db.load();
+    data.slots[0].acquiredAt = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    plugin.db.save();
+
+    const status = JSON.parse((await slot.handler({ action: 'status' }, ctx())).content);
+    assert.equal(status.used, 0);
+  });
+});
+
+test('靶标继承：子会话按 parentSessionId 落到父会话的演练', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'guada-purge-rt-'));
+  try {
+    const plugin = new GuadaPurgePlugin();
+    const api = makeApi(dataDir);
+    await plugin.onLoad(api);
+
+    const parentCtx = { session: { sessionId: 'sess-parent' } };
+    const childCtx = {
+      session: { sessionId: 'sess-child', parentSessionId: 'sess-parent' },
+    };
+
+    const engInfo = JSON.parse(
+      (await toolNamed(api, 'redteam_engagement_open').handler(
+        { name: '继承靶标' },
+        parentCtx,
+      )).content,
+    );
+
+    // 子会话自己没绑定 → 继承父会话
+    const asset = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_add').handler(
+        { value: 'inner.example.com' },
+        childCtx,
+      )).content,
+    );
+    assert.equal(asset.eng, engInfo.id);
+
+    // 父会话统计里能看到
+    const stats = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_stats').handler({}, parentCtx)).content,
+    );
+    assert.equal(stats.total, 1);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test('技能随能力包注册且内容非空', async () => {

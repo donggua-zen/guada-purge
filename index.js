@@ -23,11 +23,53 @@ const { runPreflight } = require('./core/preflight');
 const store = require('./core/store');
 
 const PLUGIN_ID = 'guada-purge';
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 
 const KIT_ID = 'redteam';
 const AGENT_ID = 'leader';
 const AGENT_NAME = '红队指挥官';
+
+/** 派活并发上限（对齐 dsh-purge 的"同一靶标最多 3 个执行智能体"） */
+const SLOT_MAX = 3;
+/** 占位租约：超时自动回收，避免子代理崩溃后名额不释放 */
+const SLOT_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * 执行角色（hidden：不出现在智能体列表/新建面板/@ 提及，只能被指挥官派活）。
+ * skills 只列各自用得上的，省 token；工具不裁剪（对齐 dsh-purge：靠人设约束）。
+ */
+const ROLES = [
+  {
+    id: 'recon',
+    name: '信息收集',
+    description: '只收集资产并落库，不碰漏洞检测；重点边缘与未备案资产。',
+    skills: ['recon-pipeline', 'fofa-recon', 'redteam-authorization'],
+  },
+  {
+    id: 'assess',
+    name: '资产梳理',
+    description: '逐条评估资产易打性（priority/potential/reason），产出"先打谁"的排序。',
+    skills: ['redteam-authorization'],
+  },
+  {
+    id: 'vuln-scan',
+    name: '漏洞发现',
+    description: '先查库去重，Nday/1day 优先，再探接口未授权；每条漏洞附原始请求。',
+    skills: ['nuclei-scan', 'recon-pipeline'],
+  },
+  {
+    id: 'exploit',
+    name: '漏洞利用',
+    description: '拿服务器权限并实测 WebShell 可连，建隧道并实测内网可达。',
+    skills: ['webshell-toolkit', 'credential-attack', 'redteam-authorization'],
+  },
+  {
+    id: 'internal',
+    name: '内网渗透',
+    description: '走既有隧道做 gogo 铺面 + fscan 打点，迭代挖出所有网段。',
+    skills: ['fscan-intranet'],
+  },
+];
 
 const FALLBACK_PERSONA =
   '你是一名红队操作员，在已获授权的攻防演练中执行渗透任务。' +
@@ -52,6 +94,8 @@ class GuadaPurgePlugin {
     this.db = null;
     this.persona = '';
     this.skills = [];
+    /** 角色 id → systemPrompt（presets/roles/<id>.md） */
+    this.rolePrompts = {};
   }
 
   async onLoad(api) {
@@ -83,6 +127,13 @@ class GuadaPurgePlugin {
   reloadAll() {
     this.persona = this.loadPersona();
     this.skills = loadSkills(path.join(this.pluginDir || '', 'skills'));
+    this.rolePrompts = {};
+    for (const role of ROLES) {
+      this.rolePrompts[role.id] = store.readText(
+        path.join(this.pluginDir || '', 'presets', 'roles', `${role.id}.md`),
+        '',
+      );
+    }
   }
 
   loadPersona() {
@@ -127,17 +178,38 @@ class GuadaPurgePlugin {
 
   registerAgent(api) {
     if (typeof api.registerAgent !== 'function') return;
+
+    // 指挥官：能派活（sub_agent 包 + 角色白名单），工具全量保留（靠人设约束只做读操作）
     api.registerAgent({
       id: AGENT_ID,
       name: AGENT_NAME,
       description:
-        '攻防演练红队操作员：预检环境 → 信息收集 → 资产梳理 → 漏洞发现 → 漏洞利用 → 内网渗透，资产与证据全程落库。',
+        '攻防演练红队指挥官：计划任务、派活给执行角色、核对回报、向用户汇报。',
       avatar: 'assets/icon.svg',
       systemPrompt: this.persona,
-      toolkits: [KIT_ID],
+      toolkits: [KIT_ID, 'sub_agent:subagent'],
       skills: this.skills.map((skill) => String(skill.name).toLowerCase()),
+      agents: ROLES.map((role) => role.id),
       settings: { memory: { summaryMode: 'memory_sync' } },
     });
+
+    // 执行角色：hidden（不出现在列表），只能被指挥官派活；不声明 agents（叶子节点）
+    for (const role of ROLES) {
+      const prompt =
+        this.rolePrompts[role.id] ||
+        `# 你的角色：${role.name}\n\n${role.description}\n\n你是叶子节点，不要再往下委派。所有产出必须落库。`;
+      api.registerAgent({
+        id: role.id,
+        name: role.name,
+        description: role.description,
+        avatar: 'assets/icon.svg',
+        systemPrompt: prompt,
+        toolkits: [KIT_ID],
+        skills: role.skills,
+        hidden: true,
+        settings: { memory: { summaryMode: 'memory_sync' } },
+      });
+    }
   }
 
   // ── 工具 ──
@@ -147,16 +219,27 @@ class GuadaPurgePlugin {
     const plugin = this;
     const tool = (def) => toolkit.registerRawTool(def);
 
-    /** 当前会话绑定的演练（未开靶时报错并给出下一步） */
+    /**
+     * 当前会话绑定的演练
+     *
+     * 子代理由主会话派出（sessionType=sub_agent），派过去的执行角色拿不到
+     * 自己的靶标绑定 → 回溯 parentSessionId，实现「靶标继承」。
+     */
     const eng = (ctx) => {
       const sessionId = ctx?.session?.sessionId || null;
-      const found = plugin.db.engagementOfSession(sessionId);
-      if (!found) {
-        throw new Error(
-          '当前会话还没有绑定靶标。先调用 redteam_engagement_open({ name, scope }) 开靶。',
-        );
+      const direct = plugin.db.engagementOfSession(sessionId);
+      if (direct) return direct;
+
+      const parentId = ctx?.session?.parentSessionId || null;
+      if (parentId) {
+        const inherited = plugin.db.engagementOfSession(parentId);
+        if (inherited) return inherited;
       }
-      return found;
+
+      throw new Error(
+        '当前会话还没有绑定靶标。指挥官先调用 redteam_engagement_open({ name, scope }) 开靶；' +
+          '执行角色无需自己开靶，会自动继承父会话的靶标。',
+      );
     };
     const json = (value) => ({ content: JSON.stringify(value, null, 2) });
 
@@ -176,6 +259,22 @@ class GuadaPurgePlugin {
       },
       dangerLevel: 'normal',
       handler: async (args, ctx) => {
+        // 执行角色（子会话）不许自行开靶：靶标从父会话继承，避免同一个靶被拆成多个演练
+        const parentId = ctx?.session?.parentSessionId || null;
+        if (parentId) {
+          const inherited = plugin.db.engagementOfSession(parentId);
+          if (inherited) {
+            return json({
+              ...inherited,
+              inherited: true,
+              note: '执行角色自动继承父会话靶标，未新建演练',
+            });
+          }
+          throw new Error(
+            '执行角色不能自行开靶：请让指挥官先用 redteam_engagement_open 绑定靶标，再派活。',
+          );
+        }
+
         const row = plugin.db.openEngagement({
           name: args?.name,
           scope: args?.scope,
@@ -232,6 +331,52 @@ class GuadaPurgePlugin {
       dangerLevel: 'safe',
       readOnly: true,
       handler: async () => json(runPreflight()),
+    });
+
+    tool({
+      name: 'redteam_agent_slot',
+      description:
+        `派活并发闸门（同一靶标最多 ${SLOT_MAX} 个执行角色）。` +
+        'status 查看占用；acquire 派活前占位（role 必填，被拒不重试）；release 释放（role 或当前会话）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['status', 'acquire', 'release'] },
+          role: { type: 'string', description: '执行角色 id：recon/assess/vuln-scan/exploit/internal' },
+        },
+        required: ['action'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        const action = String(args?.action || 'status');
+        const sessionId = ctx?.session?.sessionId || null;
+
+        if (action === 'status') {
+          const slots = plugin.db.listSlots(current.id, SLOT_TTL_MS);
+          return json({ max: SLOT_MAX, used: slots.length, slots });
+        }
+        if (action === 'acquire') {
+          const result = plugin.db.acquireSlot({
+            eng: current.id,
+            role: args?.role,
+            sessionId,
+            max: SLOT_MAX,
+            ttlMs: SLOT_TTL_MS,
+          });
+          return json(result);
+        }
+        if (action === 'release') {
+          return json(
+            plugin.db.releaseSlot({
+              eng: current.id,
+              role: args?.role,
+              sessionId: args?.role ? undefined : sessionId,
+            }),
+          );
+        }
+        throw new Error(`未知 action: ${action}（只支持 status / acquire / release）`);
+      },
     });
 
     // ── 资产 ──

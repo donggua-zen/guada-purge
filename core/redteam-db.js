@@ -35,6 +35,8 @@ const EMPTY = () => ({
   tunnels: {},
   credentials: {},
   scores: [],
+  /** 派活占位（并发闸门）：{ eng, role, sessionId, acquiredAt } */
+  slots: [],
 });
 
 class RedteamDb {
@@ -346,6 +348,71 @@ class RedteamDb {
   listScores(eng) {
     const data = this.load();
     return data.scores.filter((s) => !eng || s.eng === eng);
+  }
+
+  // ── 派活占位（并发闸门，对齐 dsh-purge 的 redteam_agent_slot） ──
+
+  /** 回收超出租约的占位（子代理崩溃时不会永久占名额） */
+  pruneExpiredSlots(ttlMs) {
+    const data = this.load();
+    const now = Date.now();
+    const before = data.slots.length;
+    data.slots = data.slots.filter((s) => {
+      const at = Date.parse(s.acquiredAt || '');
+      if (!Number.isFinite(at)) return false;
+      return now - at < ttlMs;
+    });
+    if (data.slots.length !== before) this.save();
+    return before - data.slots.length;
+  }
+
+  listSlots(eng, ttlMs) {
+    if (ttlMs) this.pruneExpiredSlots(ttlMs);
+    const data = this.load();
+    return data.slots.filter((s) => !eng || s.eng === eng);
+  }
+
+  /**
+   * 占位。满了返回 { ok:false, reason:'full' }，不抛错（模型据此决定等待）。
+   */
+  acquireSlot({ eng, role, sessionId, max, ttlMs }) {
+    if (ttlMs) this.pruneExpiredSlots(ttlMs);
+    const data = this.load();
+    const used = data.slots.filter((s) => s.eng === eng);
+    const limit = Number(max) > 0 ? Number(max) : 3;
+
+    // 同一 role + 同一会话重复 acquire → 幂等返回已占的
+    const existing = used.find((s) => s.role === role && s.sessionId === sessionId);
+    if (existing) return { ok: true, slot: existing, used: used.length, max: limit };
+
+    if (used.length >= limit) {
+      return { ok: false, reason: 'full', used: used.length, max: limit, slots: used };
+    }
+
+    const slot = {
+      eng,
+      role: String(role || 'unknown'),
+      sessionId: sessionId || null,
+      acquiredAt: new Date().toISOString(),
+    };
+    data.slots.push(slot);
+    this.save();
+    return { ok: true, slot, used: data.slots.filter((s) => s.eng === eng).length, max: limit };
+  }
+
+  /** 释放：按 role 或 sessionId 移除；都不给则清空该演练全部 */
+  releaseSlot({ eng, role, sessionId }) {
+    const data = this.load();
+    const before = data.slots.length;
+    data.slots = data.slots.filter((s) => {
+      if (s.eng !== eng) return true;
+      if (role && s.role !== role) return true;
+      if (sessionId && s.sessionId !== sessionId) return true;
+      return false;
+    });
+    const released = before - data.slots.length;
+    if (released > 0) this.save();
+    return { released, remaining: data.slots.filter((s) => s.eng === eng).length };
   }
 }
 
