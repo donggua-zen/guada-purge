@@ -1,44 +1,38 @@
 'use strict';
 
 /**
- * GuaDa Purge v1 —— 安全研究工作模式（PluginApi v4）
+ * GuaDa Purge v2 —— 红队模式（PluginApi v4）
  *
- * 形态：**专属智能体 + 专属能力**，不污染其他智能体。
+ * 对齐 dsh-purge 的能力面（P1 阶段：单兵闭环）。
  *
- *   能力包 `purge`（toolkit，visibleTo: ["self"]）
- *     ├─ 工具 purge_status / purge_rules（均只读）
- *     └─ 技能 skills/*.md（随包门控显隐）
- *   提示词段 `guada-purge.rules`（visibleTo: ["self"]，按工作目录匹配规则集）
- *   专属智能体 `plugin-guada-purge-research`「安全研究助手」
+ *   能力包 `redteam`（visibleTo: ["self"]）
+ *     ├─ 资产库工具（engagement / asset / vuln / evidence / webshell / tunnel / credential / score）
+ *     └─ 技能 skills/*.md（红队方法论）
+ *   专属智能体「红队指挥官」（plugin-guada-purge-leader）
  *
- * 约束：
- * - 零依赖 CommonJS，只用 onLoad(api) 的公开 PluginApi；
- * - 不修改宿主源码、不绕过安全策略/审批/沙箱；
- * - 不做全局注入：所有能力都带 visibleTo，其他智能体完全无感。
+ * 存储：dataDir/redteam.json（零依赖 JSON 资产库，见 core/redteam-db.js）。
+ * 边界：不修改宿主、不绕过安全策略；沙箱档位由用户自行切换。
  */
 
 const path = require('node:path');
 const os = require('node:os');
 
-const { parseRule, selectRules, renderRules } = require('./core/rules');
+const { RedteamDb } = require('./core/redteam-db');
 const { loadSkills } = require('./core/skills');
-const { buildStatus, STATUS } = require('./core/status');
+const { runPreflight } = require('./core/preflight');
 const store = require('./core/store');
 
 const PLUGIN_ID = 'guada-purge';
-const VERSION = '1.0.0';
+const VERSION = '2.0.0';
 
-/** 能力包 id（智能体的 toolkits 白名单引用它） */
-const KIT_ID = 'purge';
-/** 智能体 id：宿主导航为 plugin-guada-purge-research */
-const AGENT_ID = 'research';
-const AGENT_NAME = '安全研究助手';
-/** 规则集提示词段名 */
-const RULES_SECTION = `${PLUGIN_ID}.rules`;
+const KIT_ID = 'redteam';
+const AGENT_ID = 'leader';
+const AGENT_NAME = '红队指挥官';
 
 const FALLBACK_PERSONA =
-  '你是一名资深安全研究工程师，协助在已获授权的环境中做代码审计与漏洞验证。' +
-  '先确认边界与授权范围，最小影响优先，结论附可复核证据，区分事实与推测。';
+  '你是一名红队操作员，在已获授权的攻防演练中执行渗透任务。' +
+  '开工前先预检环境（redteam_preflight），按信息收集 → 资产梳理 → 漏洞发现 → 漏洞利用 → 内网渗透推进；' +
+  '所有资产/漏洞/证据必须落库，未核实的结论标记为 claimed。';
 
 class GuadaPurgePlugin {
   constructor() {
@@ -46,7 +40,7 @@ class GuadaPurgePlugin {
       id: PLUGIN_ID,
       name: 'GuaDa Purge',
       version: VERSION,
-      description: '安全研究工作模式 —— 专属智能体 + 规则集 + 技能库',
+      description: '红队模式 —— 专属智能体 + 资产库 + 方法论技能（不修改宿主、不绕过安全策略）',
       author: 'donggua-zen',
       category: 'user',
       icon: 'assets/icon.svg',
@@ -55,16 +49,10 @@ class GuadaPurgePlugin {
     this.api = null;
     this.pluginDir = null;
     this.dataDir = null;
-
-    /** 人设正文（presets/persona.md） */
+    this.db = null;
     this.persona = '';
-    /** 解析后的规则集 */
-    this.rules = [];
-    /** 随包技能 */
     this.skills = [];
   }
-
-  // ── 生命周期 ──
 
   async onLoad(api) {
     this.api = api;
@@ -76,37 +64,24 @@ class GuadaPurgePlugin {
         : path.join(os.tmpdir(), PLUGIN_ID);
 
     store.ensureDir(this.dataDir);
-    // 首次运行把 presets/rules/*.md 复制到数据目录（不覆盖用户已改过的文件）
-    store.seedRules(this.pluginDir, this.dataDir);
+    this.db = new RedteamDb(this.dataDir);
     this.reloadAll();
 
     this.registerCapabilityPack(api);
-    this.registerRulesSection(api);
     this.registerAgent(api);
   }
 
   async onStart() {
-    // 用户可能手工改过 rules/*.md，启用时重读一次
     this.reloadAll();
+    if (this.db) this.db.invalidate();
   }
 
   async onStop() {}
 
-  async onUnload() {
-    // 外部插件拿不到宿主的 SkillRegistry 实例；残留技能由宿主
-    // `isPluginEnabled` 判定自然不可见（见 skill-orchestrator 的可见性检查），
-    // 不需要也无法在这里手动清理。
-  }
-
-  // ── 数据加载 ──
+  async onUnload() {}
 
   reloadAll() {
     this.persona = this.loadPersona();
-    this.rules = store
-      .listRuleFiles(this.dataDir)
-      .map((file) => file.replace(/\.md$/, ''))
-      .map((id) => parseRule(id, store.readRuleFile(this.dataDir, id)))
-      .filter((rule) => rule.body);
     this.skills = loadSkills(path.join(this.pluginDir || '', 'skills'));
   }
 
@@ -118,71 +93,21 @@ class GuadaPurgePlugin {
     return String(text || '').trim() || FALLBACK_PERSONA;
   }
 
-  /** 当前工作目录下命中的规则集 */
-  activeRules(workspacePath) {
-    return selectRules(this.rules, workspacePath || '');
-  }
-
-  // ── 能力包：工具 + 技能（整包 visibleTo: self） ──
+  // ── 能力包 ──
 
   registerCapabilityPack(api) {
     if (typeof api.registerToolKit !== 'function') return;
-
     const plugin = this;
-
     api.registerToolKit({
       id: KIT_ID,
-      name: '安全研究',
-      description: '安全研究专用工具与技能（仅本插件注册的智能体可用）',
+      name: '红队',
+      description: '红队资产库与作战工具（仅本插件注册的智能体可用）',
       loadMode: 'eager',
-      // 作用域收口：只有 plugin-guada-purge-* 的智能体看得到整包
       visibleTo: ['self'],
       onLoad(toolkit) {
         plugin.registerTools(toolkit);
         plugin.registerSkills(toolkit);
       },
-    });
-  }
-
-  registerTools(toolkit) {
-    if (typeof toolkit.registerRawTool !== 'function') return;
-
-    const plugin = this;
-
-    toolkit.registerRawTool({
-      name: 'purge_status',
-      description:
-        '查看当前安全研究工作模式的状态：插件版本、生效的规则集、技能数量。只读。',
-      parameters: { type: 'object', properties: {} },
-      dangerLevel: 'safe',
-      readOnly: true,
-      handler: async (_args, ctx) => ({
-        content: plugin.statusText(ctx?.session?.workspacePath || ''),
-      }),
-    });
-
-    toolkit.registerRawTool({
-      name: 'purge_rules',
-      description:
-        '列出全部规则集，或读取指定规则集的正文。只读。' +
-        '不传 id 时列出清单（标注当前工作目录下哪些生效）；传 id 返回正文。',
-      parameters: {
-        type: 'object',
-        properties: {
-          id: {
-            type: 'string',
-            description: '规则集 id（清单里的 id 字段）；省略则只列清单',
-          },
-        },
-      },
-      dangerLevel: 'safe',
-      readOnly: true,
-      handler: async (args, ctx) => ({
-        content: plugin.rulesText(
-          ctx?.session?.workspacePath || '',
-          typeof args?.id === 'string' ? args.id : '',
-        ),
-      }),
     });
   }
 
@@ -200,121 +125,405 @@ class GuadaPurgePlugin {
     }
   }
 
-  // ── 规则集提示词段（按工作目录动态求值） ──
-
-  registerRulesSection(api) {
-    if (typeof api.registerPromptSection !== 'function') return;
-    const plugin = this;
-    api.registerPromptSection({
-      name: RULES_SECTION,
-      order: 100,
-      // 只有专属智能体会拿到本段
-      visibleTo: ['self'],
-      description: '按工作目录生效的规则集',
-      text: (ctx) =>
-        renderRules(plugin.activeRules(ctx?.session?.workspacePath || '')),
-    });
-  }
-
-  // ── 专属智能体 ──
-
   registerAgent(api) {
     if (typeof api.registerAgent !== 'function') return;
     api.registerAgent({
       id: AGENT_ID,
       name: AGENT_NAME,
       description:
-        '安全研究、代码审计与漏洞验证方法论助手：先确认授权边界，最小影响取证，结论附可复核证据。',
+        '攻防演练红队操作员：预检环境 → 信息收集 → 资产梳理 → 漏洞发现 → 漏洞利用 → 内网渗透，资产与证据全程落库。',
       avatar: 'assets/icon.svg',
       systemPrompt: this.persona,
-      // 工具包白名单（缺省会是本插件全部包，这里显式写死，避免将来加包时行为漂移）
       toolkits: [KIT_ID],
-      // 技能白名单必须显式列出（缺省会一个都不开），名字一律小写
       skills: this.skills.map((skill) => String(skill.name).toLowerCase()),
       settings: { memory: { summaryMode: 'memory_sync' } },
     });
   }
 
-  // ── 工具/状态文本 ──
+  // ── 工具 ──
 
-  statusText(workspacePath) {
-    const active = this.activeRules(workspacePath);
-    const status = buildStatus([
-      {
-        id: 'agent',
-        label: '专属智能体',
-        group: 'mode',
-        status: STATUS.APPLIED,
-        detail: `${AGENT_NAME}（plugin-${PLUGIN_ID}-${AGENT_ID}）`,
-      },
-      {
-        id: 'rules',
-        label: '规则集',
-        group: 'prompt',
-        status: active.length ? STATUS.APPLIED : STATUS.SKIPPED,
-        detail: active.length
-          ? `命中 ${active.map((r) => r.id).join(', ')}`
-          : `${this.rules.length} 个可用，当前目录无命中`,
-      },
-      {
-        id: 'skills',
-        label: '技能库',
-        group: 'capability',
-        status: this.skills.length ? STATUS.APPLIED : STATUS.SKIPPED,
-        detail: `${this.skills.length} 条`,
-      },
-      {
-        id: 'tools',
-        label: '工具',
-        group: 'capability',
-        status: STATUS.APPLIED,
-        detail: 'purge_status / purge_rules',
-      },
-    ]);
+  registerTools(toolkit) {
+    if (typeof toolkit.registerRawTool !== 'function') return;
+    const plugin = this;
+    const tool = (def) => toolkit.registerRawTool(def);
 
-    const lines = [
-      `GuaDa Purge v${VERSION}（${PLUGIN_ID}）`,
-      `工作目录：${workspacePath || '(未指定)'}`,
-    ];
-    for (const row of status.rows) {
-      lines.push(`[${row.group}]`);
-      for (const entry of row.entries) {
-        lines.push(
-          `  - ${entry.label}: ${entry.status}${entry.detail ? ` (${entry.detail})` : ''}`,
+    /** 当前会话绑定的演练（未开靶时报错并给出下一步） */
+    const eng = (ctx) => {
+      const sessionId = ctx?.session?.sessionId || null;
+      const found = plugin.db.engagementOfSession(sessionId);
+      if (!found) {
+        throw new Error(
+          '当前会话还没有绑定靶标。先调用 redteam_engagement_open({ name, scope }) 开靶。',
         );
       }
-    }
-    lines.push('提示：规则集在 plugins-data/guada-purge/rules/*.md，改完重载插件生效。');
-    return lines.join('\n');
-  }
+      return found;
+    };
+    const json = (value) => ({ content: JSON.stringify(value, null, 2) });
 
-  rulesText(workspacePath, id) {
-    if (id) {
-      const rule = this.rules.find((r) => r.id === id);
-      if (!rule) {
-        return `未找到规则集「${id}」。可用：${this.rules.map((r) => r.id).join(', ') || '(无)'}`;
-      }
-      return `# ${rule.name}（id=${rule.id}）\npaths: ${rule.paths.join(', ') || '(全部目录)'}\n\n${rule.body}`;
-    }
+    // ── 演练 ──
 
-    if (this.rules.length === 0) {
-      return '当前没有任何规则集。可在 plugins-data/guada-purge/rules/ 下放置 .md 文件。';
-    }
+    tool({
+      name: 'redteam_engagement_open',
+      description:
+        '开靶：为当前会话登记本次演练的目标与授权范围，并绑定到本会话（不影响其它会话）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '靶标单位/项目名称' },
+          scope: { type: 'string', description: '授权范围（域名/IP/C 段/时间窗/禁止动作）' },
+        },
+        required: ['name'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const row = plugin.db.openEngagement({
+          name: args?.name,
+          scope: args?.scope,
+          sessionId: ctx?.session?.sessionId || null,
+        });
+        return json(row);
+      },
+    });
 
-    const activeIds = new Set(this.activeRules(workspacePath).map((r) => r.id));
-    const lines = [
-      `规则集清单（工作目录：${workspacePath || '(未指定)'}）：`,
-    ];
-    for (const rule of this.rules) {
-      const mark = activeIds.has(rule.id) ? '✔' : ' ';
-      lines.push(
-        `  ${mark} ${rule.id} — ${rule.name}` +
-          `（paths: ${rule.paths.join(', ') || '全部'}，${rule.body.length} 字符）`,
-      );
-    }
-    lines.push('');
-    lines.push('用 purge_rules({ id }) 查看正文。');
-    return lines.join('\n');
+    tool({
+      name: 'redteam_session_bind',
+      description: '把已有演练重新绑定到当前会话（切换目标时用）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          engagementId: { type: 'string', description: '演练 id（ENG-xxx）' },
+        },
+        required: ['engagementId'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) =>
+        json(plugin.db.bindSession(args?.engagementId, ctx?.session?.sessionId || null)),
+    });
+
+    tool({
+      name: 'redteam_session_info',
+      description: '查看当前会话绑定的是哪个靶标，以及该演练的资产/漏洞/证据统计。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => {
+        const current = eng(ctx);
+        return json({
+          engagement: current,
+          assets: plugin.db.assetStats(current.id),
+          vulns: plugin.db.queryVulns(current.id).length,
+          evidence: {
+            total: plugin.db.listEvidence(current.id).length,
+            unverified: plugin.db.unverifiedCount(current.id),
+          },
+          webshells: plugin.db.listWebshells(current.id).length,
+          tunnels: plugin.db.listTunnels(current.id).length,
+          credentials: plugin.db.listCredentials(current.id).length,
+          scores: plugin.db.listScores(current.id).length,
+        });
+      },
+    });
+
+    tool({
+      name: 'redteam_preflight',
+      description:
+        '开工前环境预检：检查 FOFA_KEY / VPS_IP 等环境变量与 fscan/gogo/nuclei/nmap/suo5/frpc 是否可用，返回缺失项与降级建议。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async () => json(runPreflight()),
+    });
+
+    // ── 资产 ──
+
+    tool({
+      name: 'redteam_asset_add',
+      description: '登记一条资产（域名/IP/URL/端口服务）。信息收集阶段的产出都落这里。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: {
+            type: 'string',
+            enum: ['domain', 'host', 'url', 'service', 'segment'],
+            description: '资产类型，默认 host',
+          },
+          value: { type: 'string', description: '资产值（域名 / URL / IP）' },
+          ip: { type: 'string', description: '解析到的 IP（可选）' },
+          port: { type: 'number', description: '端口（可选）' },
+          title: { type: 'string', description: '资产标题/系统名' },
+          surface: { type: 'string', description: '暴露面描述（中间件/框架/指纹）' },
+          source: { type: 'string', description: '来源（fofa / crt.sh / 主动探测）' },
+        },
+        required: ['value'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        return json(plugin.db.addAsset({ ...args, eng: current.id }));
+      },
+    });
+
+    tool({
+      name: 'redteam_asset_query',
+      description: '查询资产（可按类型/易打性/关键字过滤）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', description: 'domain/host/url/service/segment' },
+          priority: { type: 'string', description: 'high/medium/low/unknown' },
+          contains: { type: 'string', description: '值/标题/IP 包含该关键字' },
+          limit: { type: 'number', description: '最多返回条数' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => json(plugin.db.listAssets(eng(ctx).id, args || {})),
+    });
+
+    tool({
+      name: 'redteam_asset_stats',
+      description: '资产统计：总数、按类型、按易打性分布。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.assetStats(eng(ctx).id)),
+    });
+
+    tool({
+      name: 'redteam_asset_assess',
+      description: '资产梳理：给资产打易打性（priority/potential/reason），决定先打谁。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string', description: '资产 id（A1/A2…）' },
+          priority: { type: 'string', enum: ['high', 'medium', 'low', 'unknown'] },
+          potential: { type: 'number', description: '易打性打分 0-100' },
+          reason: { type: 'string', description: '判断依据（暴露面/版本/弱口令迹象等）' },
+        },
+        required: ['assetId'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        const row = plugin.db.assessAsset(args?.assetId, args || {});
+        if (row.eng !== current.id) throw new Error('该资产不属于当前靶标');
+        return json(row);
+      },
+    });
+
+    // ── 漏洞 ──
+
+    tool({
+      name: 'redteam_vuln_add',
+      description:
+        '登记一条漏洞。必须附原始请求/响应，否则报告无法复现。落库前先 redteam_vuln_query 查重。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string', description: '关联资产 id' },
+          title: { type: 'string', description: '漏洞标题' },
+          level: {
+            type: 'string',
+            enum: ['critical', 'high', 'medium', 'low', 'info'],
+            description: '危害等级',
+          },
+          request: { type: 'string', description: '原始请求（HTTP / 命令）' },
+          response: { type: 'string', description: '关键响应片段' },
+        },
+        required: ['title'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        return json(plugin.db.addVuln({ ...args, eng: current.id }));
+      },
+    });
+
+    tool({
+      name: 'redteam_vuln_query',
+      description: '查询漏洞（按资产/等级/状态过滤）。开工前先查库，避免重复劳动。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string' },
+          level: { type: 'string' },
+          status: { type: 'string' },
+          limit: { type: 'number' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => json(plugin.db.queryVulns(eng(ctx).id, args || {})),
+    });
+
+    // ── 证据 ──
+
+    tool({
+      name: 'redteam_evidence_record',
+      description:
+        '记录一条证据，confidence 默认 claimed（待核实）。核实后必须用 redteam_evidence_upgrade 升级。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['fact', 'derived', 'inferred'], description: '证据性质' },
+          assetId: { type: 'string', description: '关联资产' },
+          summary: { type: 'string', description: '一句话结论' },
+          confidence: { type: 'string', enum: ['claimed', 'inferred', 'derived'], description: '默认 claimed' },
+        },
+        required: ['summary'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        return json(plugin.db.recordEvidence({ ...args, eng: current.id }));
+      },
+    });
+
+    tool({
+      name: 'redteam_evidence_list',
+      description: '列出证据（可按 confidence/资产过滤）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          confidence: { type: 'string', description: 'claimed/inferred/derived/observed' },
+          assetId: { type: 'string' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => json(plugin.db.listEvidence(eng(ctx).id, args || {})),
+    });
+
+    tool({
+      name: 'redteam_evidence_upgrade',
+      description:
+        '把 claimed 证据升级为 observed（必须已亲自核实：curl 实测 / 浏览器登录 / 原始请求）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          evidenceId: { type: 'string', description: '证据 id（E1/E2…）' },
+          verifiedResult: { type: 'string', description: '核实方式与结果' },
+        },
+        required: ['evidenceId', 'verifiedResult'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) =>
+        json(plugin.db.upgradeEvidence(args?.evidenceId, args?.verifiedResult)),
+    });
+
+    tool({
+      name: 'redteam_unverified_count',
+      description: '统计还有多少条 claimed 未核实。>0 时汇报必须提醒用户。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json({ unverified: plugin.db.unverifiedCount(eng(ctx).id) }),
+    });
+
+    // ── 入口 ──
+
+    tool({
+      name: 'redteam_webshell_add',
+      description: '登记 WebShell 入口（必须实测能连上才算入口，登记后仍为未核实）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string' },
+          url: { type: 'string', description: 'WebShell 地址（含参数）' },
+          type: { type: 'string', description: 'behinder/godzilla/其他' },
+        },
+        required: ['url'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.addWebshell({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_webshell_list',
+      description: '列出已登记的 WebShell。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listWebshells(eng(ctx).id)),
+    });
+
+    tool({
+      name: 'redteam_tunnel_add',
+      description:
+        '登记隧道。必须写清目标侧入口类型（entry_kind）——自己 VPS 上开的代理不算隧道。',
+      parameters: {
+        type: 'object',
+        properties: {
+          entryKind: { type: 'string', description: '目标侧入口（webshell/suo5/frp/vpn…）' },
+          listen: { type: 'string', description: '本地监听地址，如 socks5://127.0.0.1:1080' },
+          reachable: { type: 'string', description: '实测可达的内网网段' },
+        },
+        required: ['listen'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.addTunnel({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_tunnel_list',
+      description: '列出已登记隧道。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listTunnels(eng(ctx).id)),
+    });
+
+    tool({
+      name: 'redteam_credential_add',
+      description:
+        '登记凭据。只有凭据不算账号权限：必须浏览器实测登录成功后再升级（loginVerified）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string' },
+          username: { type: 'string' },
+          secretMasked: { type: 'string', description: '脱敏后的口令/哈希' },
+        },
+        required: ['username'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.addCredential({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_credential_list',
+      description: '列出已登记凭据（口令已脱敏）。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listCredentials(eng(ctx).id)),
+    });
+
+    // ── 评分 ──
+
+    tool({
+      name: 'redteam_score_hit',
+      description: '登记一个得分点（拿到分才记；报告只收录拿到分的成果）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          point: { type: 'string', description: '得分点名称' },
+          note: { type: 'string', description: '怎么拿到的（命令/入口）' },
+        },
+        required: ['point'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.hitScore({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_score_list',
+      description: '列出已拿到的得分点。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listScores(eng(ctx).id)),
+    });
   }
 }
 

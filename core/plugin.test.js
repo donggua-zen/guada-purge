@@ -1,12 +1,13 @@
 'use strict';
 
 /**
- * 注册结构测试（PluginApi v4）
+ * 注册结构与红队契约测试
  *
- * 目标不是覆盖率，而是**钉死隔离契约**：
- * - 所有能力都必须带 visibleTo（否则又退回全局污染）
- * - 工具/技能只在能力包里，不再出现在顶层注册
- * - 专属智能体显式声明 toolkits 与 skills 白名单
+ * 钉死的不是覆盖率，而是：
+ * - 能力整包收口（visibleTo: self），不污染其它智能体
+ * - 工具全集齐备且命名与 dsh-purge 对齐
+ * - 所有写操作都要求先开靶（未绑定时给出可执行提示）
+ * - 证据链 claimed → observed 只能单向升级
  */
 
 const test = require('node:test');
@@ -18,14 +19,7 @@ const path = require('node:path');
 const GuadaPurgePlugin = require('../index');
 
 function makeApi(dataDir) {
-  const calls = {
-    kits: [],
-    sections: [],
-    agents: [],
-    /** 任何"全局注册"都会落到这里；测试末尾断言为空 */
-    globals: [],
-  };
-
+  const calls = { kits: [], agents: [], sections: [], globals: [] };
   const handle = {
     id: null,
     name: null,
@@ -48,17 +42,16 @@ function makeApi(dataDir) {
       calls.kits.push(def);
       handle.id = def.id;
       handle.name = def.name;
-      // 宿主时序：api.onLoad 之后、flush 之前调用 kit.def.onLoad(tk)
       if (typeof def.onLoad === 'function') def.onLoad(handle);
       return handle;
-    },
-    registerPromptSection(def) {
-      calls.sections.push(def);
     },
     registerAgent(def) {
       calls.agents.push(def);
     },
-    // 下面这些在 v1 里都不应再被调用
+    registerPromptSection(def) {
+      calls.sections.push(def);
+    },
+    // v2 起不应再出现的全局注册
     registerTool(def) {
       calls.globals.push(['registerTool', def]);
     },
@@ -75,12 +68,11 @@ function makeApi(dataDir) {
       calls.globals.push(['registerNls', locale]);
     },
   };
-
   return api;
 }
 
 async function withPlugin(fn) {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'guada-purge-v4-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'guada-purge-rt-'));
   try {
     const plugin = new GuadaPurgePlugin();
     const api = makeApi(dataDir);
@@ -91,111 +83,259 @@ async function withPlugin(fn) {
   }
 }
 
-test('v1 只注册一个能力包、一个规则段、一个专属智能体', async () => {
+const ctx = () => ({ session: { sessionId: 'session-test' } });
+const toolNamed = (api, name) => api.handle.tools.find((t) => t.name === name);
+
+test('只注册一个能力包 + 一个专属智能体，无全局注册', async () => {
   await withPlugin(async ({ api }) => {
     assert.equal(api.calls.kits.length, 1);
-    assert.equal(api.calls.sections.length, 1);
     assert.equal(api.calls.agents.length, 1);
-    // 不再有全局注册
     assert.deepEqual(api.calls.globals, []);
+    assert.deepEqual(api.calls.kits[0].visibleTo, ['self']);
+    assert.equal(api.calls.kits[0].id, 'redteam');
+    assert.equal(api.calls.kits[0].loadMode, 'eager');
   });
 });
 
-test('能力包整包收口：visibleTo self + eager', async () => {
-  await withPlugin(async ({ api }) => {
-    const kit = api.calls.kits[0];
-    assert.equal(kit.id, 'purge');
-    assert.equal(kit.loadMode, 'eager');
-    assert.deepEqual(kit.visibleTo, ['self']);
-  });
-});
-
-test('包内两个工具均为只读，且不再有 apply/revert', async () => {
+test('工具全集与 dsh-purge 命名对齐', async () => {
   await withPlugin(async ({ api }) => {
     const names = api.handle.tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ['purge_rules', 'purge_status']);
-    for (const tool of api.handle.tools) {
-      assert.equal(tool.readOnly, true, `${tool.name} must be readOnly`);
-      assert.equal(typeof tool.handler, 'function');
-    }
+    assert.deepEqual(names, [
+      'redteam_asset_add',
+      'redteam_asset_assess',
+      'redteam_asset_query',
+      'redteam_asset_stats',
+      'redteam_credential_add',
+      'redteam_credential_list',
+      'redteam_engagement_open',
+      'redteam_evidence_list',
+      'redteam_evidence_record',
+      'redteam_evidence_upgrade',
+      'redteam_preflight',
+      'redteam_score_hit',
+      'redteam_score_list',
+      'redteam_session_bind',
+      'redteam_session_info',
+      'redteam_tunnel_add',
+      'redteam_tunnel_list',
+      'redteam_unverified_count',
+      'redteam_vuln_add',
+      'redteam_vuln_query',
+      'redteam_webshell_add',
+      'redteam_webshell_list',
+    ]);
   });
 });
 
-test('包内注册随包技能，且继承整包作用域', async () => {
+test('只读工具声明 readOnly，写工具不声明', async () => {
   await withPlugin(async ({ api }) => {
-    assert.equal(api.handle.skills.length, 6);
-    for (const skill of api.handle.skills) {
-      assert.ok(skill.name, 'skill name required');
-      assert.ok(skill.content && skill.content.length > 0, 'skill content required');
-      // 未显式声明 → 运行时继承 kit 的 visibleTo
-      assert.equal(skill.visibleTo, undefined);
+    const readOnly = ['redteam_preflight', 'redteam_asset_query', 'redteam_vuln_query', 'redteam_score_list'];
+    for (const name of readOnly) {
+      assert.equal(toolNamed(api, name).readOnly, true, `${name} 应只读`);
     }
+    assert.notEqual(toolNamed(api, 'redteam_asset_add').readOnly, true);
   });
 });
 
-test('规则段带 visibleTo，并按工作目录动态匹配', async () => {
+test('未开靶时写操作给出可执行提示', async () => {
   await withPlugin(async ({ api }) => {
-    const section = api.calls.sections[0];
-    assert.equal(section.name, 'guada-purge.rules');
-    assert.equal(section.order, 100);
-    assert.deepEqual(section.visibleTo, ['self']);
-
-    const frontendText = section.text({
-      session: { workspacePath: 'D:/work/app/frontend/page' },
-    });
-    assert.match(frontendText, /前端工作约定/);
-
-    const backendText = section.text({
-      session: { workspacePath: 'D:/work/app/backend-ts/modules' },
-    });
-    assert.match(backendText, /后端工作约定/);
-    assert.doesNotMatch(backendText, /前端工作约定/);
-
-    const noneText = section.text({ session: { workspacePath: 'D:/tmp/random' } });
-    assert.equal(noneText, '');
+    const tool = toolNamed(api, 'redteam_asset_add');
+    await assert.rejects(
+      () => Promise.resolve(tool.handler({ value: '1.1.1.1' }, ctx())),
+      /先调用 redteam_engagement_open/,
+    );
   });
+});
+
+test('开靶 → 资产 → 漏洞 → 证据 → 评分 全链路', async () => {
+  await withPlugin(async ({ api }) => {
+    const open = await toolNamed(api, 'redteam_engagement_open').handler(
+      { name: '演示靶标', scope: 'example.com' },
+      ctx(),
+    );
+    const eng = JSON.parse(open.content);
+    assert.match(eng.id, /^ENG-/);
+    assert.equal(eng.sessionId, 'session-test');
+
+    const assetRaw = await toolNamed(api, 'redteam_asset_add').handler(
+      { kind: 'domain', value: 'admin.example.com', surface: 'nginx/1.20 ThinkPHP' },
+      ctx(),
+    );
+    const asset = JSON.parse(assetRaw.content);
+    assert.match(asset.id, /^A\d+/);
+    assert.equal(asset.eng, eng.id);
+
+    const assessed = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_asset_assess').handler(
+          { assetId: asset.id, priority: 'high', potential: 85, reason: 'Nday 版本' },
+          ctx(),
+        )
+      ).content,
+    );
+    assert.equal(assessed.priority, 'high');
+
+    const vuln = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_vuln_add').handler(
+          { assetId: asset.id, title: 'ThinkPHP RCE', level: 'critical', request: 'GET /index.php?s=...' },
+          ctx(),
+        )
+      ).content,
+    );
+    assert.match(vuln.id, /^V\d+/);
+
+    const ev = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_evidence_record').handler(
+          { summary: '疑似 RCE 回显', assetId: asset.id },
+          ctx(),
+        )
+      ).content,
+    );
+    assert.equal(ev.confidence, 'claimed');
+
+    const before = JSON.parse(
+      (await toolNamed(api, 'redteam_unverified_count').handler({}, ctx())).content,
+    );
+    assert.equal(before.unverified, 1);
+
+    const upgraded = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_evidence_upgrade').handler(
+          { evidenceId: ev.id, verifiedResult: 'curl 返回 uid=0' },
+          ctx(),
+        )
+      ).content,
+    );
+    assert.equal(upgraded.confidence, 'observed');
+
+    const after = JSON.parse(
+      (await toolNamed(api, 'redteam_unverified_count').handler({}, ctx())).content,
+    );
+    assert.equal(after.unverified, 0);
+
+    const score = JSON.parse(
+      (
+        await toolNamed(api, 'redteam_score_hit').handler(
+          { point: '边界突破', note: 'ThinkPHP RCE 拿 shell' },
+          ctx(),
+        )
+      ).content,
+    );
+    assert.match(score.id, /^S\d+/);
+
+    // 统计口径
+    const stats = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_stats').handler({}, ctx())).content,
+    );
+    assert.equal(stats.total, 1);
+    assert.equal(stats.byPriority.high, 1);
+
+    const info = JSON.parse(
+      (await toolNamed(api, 'redteam_session_info').handler({}, ctx())).content,
+    );
+    assert.equal(info.vulns, 1);
+    assert.equal(info.scores, 1);
+    assert.equal(info.evidence.unverified, 0);
+  });
+});
+
+test('资产库落盘，重新加载后仍在（跨重启）', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'guada-purge-rt-'));
+  try {
+    const plugin1 = new GuadaPurgePlugin();
+    const api1 = makeApi(dataDir);
+    await plugin1.onLoad(api1);
+    await toolNamed(api1, 'redteam_engagement_open').handler({ name: 'T1' }, ctx());
+    await toolNamed(api1, 'redteam_asset_add').handler({ value: 'a.example.com' }, ctx());
+
+    const file = path.join(dataDir, 'redteam.json');
+    assert.equal(fs.existsSync(file), true);
+
+    // 模拟重启：新实例读同一 dataDir
+    const plugin2 = new GuadaPurgePlugin();
+    const api2 = makeApi(dataDir);
+    await plugin2.onLoad(api2);
+    const stats = JSON.parse(
+      (await toolNamed(api2, 'redteam_asset_stats').handler({}, ctx())).content,
+    );
+    assert.equal(stats.total, 1);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('不同会话的靶标互不干扰', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'guada-purge-rt-'));
+  try {
+    const plugin = new GuadaPurgePlugin();
+    const api = makeApi(dataDir);
+    await plugin.onLoad(api);
+
+    const ctxA = { session: { sessionId: 'sess-A' } };
+    const ctxB = { session: { sessionId: 'sess-B' } };
+
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: 'A 靶标' }, ctxA);
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: 'B 靶标' }, ctxB);
+    await toolNamed(api, 'redteam_asset_add').handler({ value: 'a.example.com' }, ctxA);
+
+    const statsA = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_stats').handler({}, ctxA)).content,
+    );
+    const statsB = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_stats').handler({}, ctxB)).content,
+    );
+    assert.equal(statsA.total, 1);
+    assert.equal(statsB.total, 0);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test('专属智能体声明能力白名单，人设来自 presets/persona.md', async () => {
   await withPlugin(async ({ api }) => {
     const agent = api.calls.agents[0];
-    assert.equal(agent.id, 'research');
-    assert.equal(agent.name, '安全研究助手');
-    assert.deepEqual(agent.toolkits, ['purge']);
-    assert.equal(agent.skills.length, 6);
+    assert.equal(agent.id, 'leader');
+    assert.equal(agent.name, '红队指挥官');
+    assert.deepEqual(agent.toolkits, ['redteam']);
+    assert.ok(agent.skills.length >= 6);
     for (const name of agent.skills) {
-      assert.equal(name, name.toLowerCase(), 'skills 白名单必须小写');
+      assert.equal(name, name.toLowerCase());
     }
-    assert.ok(agent.systemPrompt.length > 50, 'persona 正文不应为空');
-    assert.match(agent.systemPrompt, /安全研究/);
+    assert.ok(agent.systemPrompt.length > 200);
+    assert.match(agent.systemPrompt, /红队/);
   });
 });
 
-test('purge_status 报告规则命中情况', async () => {
+test('技能随能力包注册且内容非空', async () => {
   await withPlugin(async ({ api }) => {
-    const tool = api.handle.tools.find((t) => t.name === 'purge_status');
-    const result = await tool.handler(
-      {},
-      { session: { workspacePath: 'D:/work/app/frontend/x' } },
+    const names = api.handle.skills.map((s) => s.name).sort();
+    for (const expected of [
+      'credential-attack',
+      'fofa-recon',
+      'fscan-intranet',
+      'nuclei-scan',
+      'recon-pipeline',
+      'redteam-authorization',
+      'webshell-toolkit',
+    ]) {
+      assert.ok(names.includes(expected), `缺少技能 ${expected}`);
+    }
+    for (const skill of api.handle.skills) {
+      assert.ok(skill.content.length > 200, `${skill.name} 内容过短`);
+    }
+  });
+});
+
+test('preflight 返回环境与工具检查结果', async () => {
+  await withPlugin(async ({ api }) => {
+    const result = JSON.parse(
+      (await toolNamed(api, 'redteam_preflight').handler({}, ctx())).content,
     );
-    assert.match(result.content, /GuaDa Purge v1\.0\.0/);
-    assert.match(result.content, /命中 frontend/);
-  });
-});
-
-test('purge_rules 无 id 列清单，有 id 返回正文', async () => {
-  await withPlugin(async ({ api }) => {
-    const tool = api.handle.tools.find((t) => t.name === 'purge_rules');
-    const ctx = { session: { workspacePath: 'D:/work/app/frontend/x' } };
-
-    const list = await tool.handler({}, ctx);
-    assert.match(list.content, /规则集清单/);
-    assert.match(list.content, /frontend/);
-
-    const body = await tool.handler({ id: 'backend' }, ctx);
-    assert.match(body.content, /后端工作约定/);
-
-    const missing = await tool.handler({ id: 'nope' }, ctx);
-    assert.match(missing.content, /未找到规则集/);
+    assert.ok(Array.isArray(result.env));
+    assert.ok(Array.isArray(result.tools));
+    assert.ok(result.env.some((item) => item.key === 'FOFA_KEY'));
+    assert.equal(typeof result.ready, 'boolean');
   });
 });

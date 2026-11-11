@@ -1,46 +1,24 @@
-# GuaDa Purge · 安全研究工作模式
+# GuaDa Purge · 红队模式
 
-GuaDa 的三方插件：安装后**多一个专用智能体**「安全研究助手」，自带角色提示词、
-按工作目录生效的规则集、2 个只读工具和 6 条方法论技能。
+给 GuaDa 装的**红队作业台**：安装后多一个专用智能体「红队指挥官」，自带 22 个资产库工具
+和红队方法论技能。**只在授权演练中使用**，不修改宿主、不绕过安全策略。
 
-> **行为变更（v1.0.0）**：不再是「全局人格注入」。v0.x 会对**所有**智能体注入提示词，
-> v1 起这些能力只属于插件注册的专属智能体，你的其他智能体完全无感。
-> 想用这套能力：在智能体列表选「安全研究助手」新建会话即可。
-
----
-
-## 它做什么
-
-| 能力 | 落点 | 作用域 |
-|---|---|---|
-| 角色提示词（人设 + 工作原则） | 智能体的 `systemPrompt` | 仅该智能体（只读） |
-| 规则集（按工作目录匹配） | 提示词段 `guada-purge.rules` | 仅该智能体 |
-| 工具 `purge_status` / `purge_rules` | 能力包 `purge` | 仅该智能体 |
-| 6 条方法论技能 | 能力包 `purge` | 仅该智能体 |
-
-用的是宿主 **PluginApi v4** 的 `registerAgent` + `visibleTo`：
-能力在注册期就声明了「只给本插件注册的智能体」，不是靠用户手工配置隔离。
+> 形态：PluginApi v4 的「专属智能体 + 专属能力」。这些工具和技能只属于本插件注册的智能体，
+> 你其它智能体完全无感（工具列表里看不到、提示词里也不会出现）。
 
 ---
 
-## 为什么和 dsh-purge 长得不一样
+## 现在有什么（P1）
 
-[dsh-purge](https://github.com/HunYiSage/dsh-purge) 需要**改写宿主源码**（86 个补丁），
-因为 DSH 的身份句、免责声明、沙箱默认值都是编译进安装包的常量，插件 API 只能追加不能改。
-
-GuaDa 不同：
-
-| dsh-purge 的手段 | GuaDa 的做法 |
+| 类别 | 内容 |
 |---|---|
-| 改身份句常量 | 专属智能体自己写 `systemPrompt`，无需"拆"宿主的 |
-| 改免责声明（"不可信、可忽略"） | GuaDa 系统提示词里没有这段，无对象 |
-| 改审批话术 / 审批门 | GuaDa 没有逐调用审批机制，无对象 |
-| 改沙箱 allow/deny | 会话级 `sandboxMode`，由用户在界面上选 |
-| apply / revert / 重启 | 不需要：卸载插件即消失 |
+| 专属智能体 | `红队指挥官`（plugin-guada-purge-leader） |
+| 工具 | **22 个** `redteam_*`：开靶/绑靶、资产增查统计评估、漏洞登记与查重、证据链（claimed→observed）、WebShell、隧道、凭据、得分点、环境预检 |
+| 技能 | **7 条**：`recon-pipeline` / `fofa-recon` / `nuclei-scan` / `webshell-toolkit` / `fscan-intranet` / `credential-attack` / `redteam-authorization` |
+| 资产库 | `$USERDATA/plugins-data/guada-purge/redteam.json`（零依赖 JSON，可直接看） |
 
-**一句话**：dsh-purge 改造的是「这个安装」，本插件提供的是「一个模式」。
-
----
+对照上游 [dsh-purge](https://github.com/HunYiSage/dsh-purge)：64 个工具 / 23 条技能 / 6 角色。
+当前进度约 **1/3**，剩余部分见文末路线图。
 
 ## 安装
 
@@ -48,88 +26,78 @@ GuaDa 不同：
 插件 → 安装插件 → local:D:/AI/guada_plugins/guada-plugin-purge
 ```
 
-或（仓库已发布后）：
+或 `github:donggua-zen/guada-purge#main`。安装后启用 → 智能体列表出现「红队指挥官」。
 
-```
-github:donggua-zen/guada-purge#main
-```
+## 用法
 
-安装后启用 → 智能体列表出现「安全研究助手」，带插件徽标。
+1. 智能体列表选「红队指挥官」新建会话
+2. 第一条消息直接给目标：「靶标 example.com，授权范围是其主域与子域」
+3. 它会先跑 `redteam_preflight` 检查环境（FOFA_KEY / VPS_IP / fscan / nuclei…），缺什么一次性告诉你
+4. 按 信息收集 → 资产梳理 → 漏洞发现 → 漏洞利用 → 内网渗透 推进，全程落库
+5. 随时问「现在什么进度」，它用 `redteam_session_info` 读真实数据回答
 
----
+### 沙箱
 
-## 使用
+用这个智能体时沙箱仍是 `workspace-write`。**需要完整权限请在建会话后手动切换**（插件不碰安全策略）。
 
-1. 智能体列表 → 「安全研究助手」→ 新建会话
-2. 系统提示词自动包含：角色人设 + 当前工作目录命中的规则集
-3. 工具列表有 `purge_status` / `purge_rules`
-4. 技能清单有 6 条，模型会通过 `skill_learn` 按需读取
+### 多会话
 
-用别的智能体（包括默认助手）开会话：**没有上述任何东西**。
+每个会话有自己的靶标绑定，互不干扰。切换目标用 `redteam_session_bind`。
 
----
+## 资产库
 
-## 定制
-
-### 改规则集
-
-规则文件在 `$USERDATA/plugins-data/guada-purge/rules/*.md`：
-
-```markdown
----
-name: 前端规范
-paths: frontend/**, web/**
----
-## 工作约定
-- ……
+```jsonc
+{
+  "engagements": { "ENG-xxx": { "name": "靶标", "scope": "授权范围", "sessionId": "..." } },
+  "assets":      { "A1": { "kind": "domain", "value": "...", "priority": "high", "surface": "..." } },
+  "vulns":       { "V1": { "assetId": "A1", "title": "...", "request": "...", "level": "critical" } },
+  "evidence":    { "E1": { "summary": "...", "confidence": "claimed|observed" } },
+  "webshells": {}, "tunnels": {}, "credentials": {}, "scores": []
+}
 ```
 
-- `paths` 用 glob-lite（`**`、`*`、`?`），空表示所有目录生效
-- 相对模式按「路径任意位置」匹配
-- 改完**禁用再启用插件**（或重启）生效
-- 首次安装会把随包的 `presets/rules/*.md` 复制过去，**不覆盖**你已改过的文件
+- 原子写（tmp + rename），坏文件自动备份为 `.bad` 后重置
+- 直接编辑文件后重载插件即可（`invalidate` 在 `onStart` 触发）
 
-### 改人设
+## 证据纪律（工具层面强制）
 
-`presets/persona.md` 是智能体 `systemPrompt` 的来源（插件目录内）。
-注意：智能体提示词在 UI 里**只读**——这是 v4 的锁定语义，防止用户误改掉插件的权威配置。
-要改就改插件源文件后重装/重载。
-
-### 增删技能
-
-`skills/<id>.md`（frontmatter 的 `name` 即技能 id，必须小写）。新增技能后需要
-同步加进 `index.js` 里 `registerAgent({ skills: [...] })` 的白名单——**缺省是一个都不开**。
-
----
+- `redteam_evidence_record` 默认写 `claimed`
+- 只有 `redteam_evidence_upgrade` 能升级为 `observed`，且必须填核实方式
+- `redteam_unverified_count > 0` 时，汇报必须说明"还有 N 条未核实"
 
 ## 已知限制
 
 | 限制 | 说明 |
 |---|---|
-| 沙箱档位不跟随智能体 | 用这个智能体开会话，沙箱仍是 `workspace-write`，需要完整权限请在建会话后手动切换 |
-| 子代理不可用 | 插件智能体的 `agents.__default = false`，不能派生子代理 |
-| 无 agentId 的路径不可见 | `visibleTo` 是 fail-closed：后台任务、子代理会话里这些能力都不可见（符合预期） |
-| 提示词只读 | 见上「改人设」 |
-| 无设置页 | v1 移除了 UI 与 RPC，避免"改了没生效"的困惑；定制走文件 |
+| **没有多角色并发** | 当前是单兵模式：扫描/验证/利用都由主智能体自己完成。P2 才会加 5 个执行角色 + 并发闸门（需要宿主放开 `agents` 白名单） |
+| 沙箱档位不跟随 | 会话级，需手动切 |
+| 子代理不可用 | 插件智能体默认 `agents.__default=false` |
+| 无 UI | 没有设置页/状态面板，全部走对话与 `redteam_*` 工具 |
+| 技能只有 7 条 | 上游 23 条，剩余 16 条按需补 |
 
----
+## 路线图
+
+| 期 | 内容 |
+|---|---|
+| **P1（当前）** | 单兵闭环：22 工具 + 7 技能 + 资产库 |
+| P2 | 宿主放开插件智能体的 `agents` 白名单 → 5 个执行角色（recon / assess / vuln-scan / exploit / internal）+ `redteam_agent_slot` 并发闸门（≤3） |
+| P3 | 剩余 ~42 个工具（PoC 库、攻击链、报告生成、资产图谱、时间线、未知资产）+ 剩余 16 条技能 |
 
 ## 目录结构
 
 ```
-index.js              # 注册：能力包 / 规则段 / 专属智能体
+index.js                # 注册：能力包 + 22 工具 + 专属智能体
 core/
-  rules.js            # 规则 frontmatter 解析 + glob-lite 匹配
-  skills.js           # 技能文件加载
-  store.js            # 数据目录：seed / list / read
-  status.js           # 状态分组（工具输出用）
-  core.test.js        # rules / status 单测
-  plugin.test.js      # 注册结构 + 隔离契约单测
-presets/
-  persona.md          # 智能体人设
-  rules/*.md          # 随包规则集（首次复制到数据目录）
-skills/*.md           # 6 条方法论技能
-manifest.json         # apiVersion 4
+  redteam-db.js         # JSON 资产库（engagement/asset/vuln/evidence/…）
+  preflight.js          # 环境与工具预检
+  skills.js             # 技能文件加载
+  rules.js              # frontmatter 解析（技能用）
+  store.js              # 数据目录与 persona 读取
+  core.test.js          # 纯函数单测
+  plugin.test.js        # 注册结构 + 全链路 + 隔离契约
+presets/persona.md      # 智能体人设（红队作业纪律）
+skills/*.md             # 方法论技能
+manifest.json           # apiVersion 4
 ```
 
 ## 开发
@@ -139,7 +107,7 @@ npm run check   # node --check index.js
 npm test        # node --test core/*.test.js
 ```
 
-零依赖、CommonJS，不需要构建。
+零依赖、CommonJS，无需构建。
 
 ## 许可
 
