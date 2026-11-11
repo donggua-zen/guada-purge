@@ -8,17 +8,32 @@
 
 ---
 
-## 现在有什么（P3-1）
+## 现在有什么（P3-2）
 
 | 类别 | 内容 |
 |---|---|
 | 智能体 | **6 个**：`红队指挥官`（可见）+ 5 个执行角色（隐藏：信息收集 / 资产梳理 / 漏洞发现 / 漏洞利用 / 内网渗透） |
-| 工具 | **36 个** `redteam_*`：开靶/绑靶、资产增查统计评估、漏洞登记与查重、证据链、WebShell、隧道、凭据、得分点、环境预检、派活闸门、**攻击链**、**Markdown 报告**、**未知资产** |
+| 工具 | **49 个** `redteam_*`：开靶/绑靶、资产（增查统计评估/**详情/关系/图谱/时间线/连通探测**）、漏洞（登记/查重/**状态流转**）、证据（含 **HTTP 报文归档/复现核实**）、WebShell、隧道、凭据、**截图**、得分点、预检、派活闸门、攻击链、Markdown 报告、未知资产 |
 | 技能 | **7 条**：`recon-pipeline` / `fofa-recon` / `nuclei-scan` / `webshell-toolkit` / `fscan-intranet` / `credential-attack` / `redteam-authorization` |
 | 资产库 | `$USERDATA/plugins-data/guada-purge/redteam.json`（零依赖 JSON，可直接看） |
 
 对照上游 [dsh-purge](https://github.com/HunYiSage/dsh-purge)：64 个工具 / 23 条技能 / 6 角色。
-当前覆盖：工具 **36/64**、技能 7/23、角色 6/6。
+当前覆盖：工具 **49/64**、技能 7/23、角色 6/6。
+
+### 资产深挖（P3-2 新增）
+
+```
+redteam_asset_get       单资产详情（关联漏洞/证据/链步骤/入口/关系）
+redteam_asset_link      建关系（subdomain / resolves-to / hosts / pivot）
+redteam_asset_graph     图谱（节点 + 边）
+redteam_asset_timeline  时间线（资产/漏洞/证据/步骤按时间排）
+redteam_asset_test      连通性探测（HEAD→GET 回退，返回状态码/标题/指纹/耗时）
+redteam_vuln_update     状态流转：found → confirmed → exploited / false-positive
+redteam_webshell_update / tunnel_update   标记"已实测连通/可达"
+redteam_http_evidence_add   归档原始 HTTP 报文（直接记为 observed）
+redteam_evidence_verify     复现核实（给 URL 会实际发请求比对）
+redteam_shot_add / shot_list / shot_delete  截图登记
+```
 
 ### 报告能力（P3-1 新增）
 
@@ -101,8 +116,8 @@ redteam_unknown_*      暂时说不清的资产先挂着，不丢
 |---|---|
 | P1 ✅ | 单兵闭环：22 工具 + 7 技能 + 资产库 |
 | P2 ✅ | 5 个执行角色 + 指挥官派活 + 并发闸门（≤3）+ 靶标继承 + 角色隐藏 |
-| **P3-1 ✅（当前）** | 攻击链 + Markdown 报告 + 未知资产（13 个工具，共 36） |
-| P3-2 | 资产深挖（图谱/时间线/连通测试）+ 更新类 + 证据补充 + 截图（13 个工具） |
+| **P3-1 ✅** | 攻击链 + Markdown 报告 + 未知资产（13 个工具，共 36） |
+| **P3-2 ✅（当前）** | 资产深挖（详情/关系/图谱/时间线/连通探测）+ 状态流转 + HTTP 证据 + 截图（13 个，共 49） |
 | P3-3 | PoC 库（6 个工具） |
 | P3-4 | 凭据/会话/索引（6 个工具） |
 | P3-5 | 剩余 17 条技能 |

@@ -59,6 +59,7 @@ function buildReport(db, engagement) {
   const tunnels = db.listTunnels(eng);
   const credentials = db.listCredentials(eng);
   const attackFiles = db.listAttackFiles(eng);
+  const shots = db.listShots(eng);
   const unknowns = db.listUnknowns(eng);
 
   const points = resolvePoints(db, eng);
@@ -216,10 +217,29 @@ function buildReport(db, engagement) {
   push();
 
   // ── 攻击文件 ──
-  if (attackFiles.length) {
-    push('## 七、产出文件');
+  if (attackFiles.length || shots.length) {
+    push('## 七、产出文件与截图');
     push();
-    push(fmtList(attackFiles, (f) => `- ${f.name}（${f.kind}）${f.path ? ` \`${f.path}\`` : ''}${f.note ? ` — ${f.note}` : ''}`));
+    if (attackFiles.length) {
+      push(
+        fmtList(
+          attackFiles,
+          (f) =>
+            `- ${f.name}（${f.kind}）${f.path ? ` \`${f.path}\`` : ''}${f.note ? ` — ${f.note}` : ''}`,
+        ),
+      );
+    }
+    if (shots.length) {
+      push();
+      push('截图：');
+      push(
+        fmtList(
+          shots,
+          (s) =>
+            `- \`${s.path}\`${s.assetId ? `（资产 ${s.assetId}）` : ''}${s.note ? ` — ${s.note}` : ''}`,
+        ),
+      );
+    }
     push();
   }
 

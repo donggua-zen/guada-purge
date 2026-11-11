@@ -118,8 +118,13 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_agent_slot',
       'redteam_asset_add',
       'redteam_asset_assess',
+      'redteam_asset_get',
+      'redteam_asset_graph',
+      'redteam_asset_link',
       'redteam_asset_query',
       'redteam_asset_stats',
+      'redteam_asset_test',
+      'redteam_asset_timeline',
       'redteam_attack_chain',
       'redteam_attack_file_add',
       'redteam_attack_file_list',
@@ -132,6 +137,8 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_evidence_list',
       'redteam_evidence_record',
       'redteam_evidence_upgrade',
+      'redteam_evidence_verify',
+      'redteam_http_evidence_add',
       'redteam_preflight',
       'redteam_report',
       'redteam_report_targets',
@@ -141,16 +148,22 @@ test('工具全集与 dsh-purge 命名对齐', async () => {
       'redteam_score_report',
       'redteam_session_bind',
       'redteam_session_info',
+      'redteam_shot_add',
+      'redteam_shot_delete',
+      'redteam_shot_list',
       'redteam_tunnel_add',
       'redteam_tunnel_list',
+      'redteam_tunnel_update',
       'redteam_unknown_list',
       'redteam_unknown_record',
       'redteam_unknown_resolve',
       'redteam_unverified_count',
       'redteam_vuln_add',
       'redteam_vuln_query',
+      'redteam_vuln_update',
       'redteam_webshell_add',
       'redteam_webshell_list',
+      'redteam_webshell_update',
     ]);
   });
 });
@@ -635,5 +648,171 @@ test('report_targets 按资产汇总成果', async () => {
     assert.equal(targets.totals.vulns, 1);
     assert.equal(targets.targets[0].vulns, 1);
     assert.equal(targets.targets[0].chains, 1);
+  });
+});
+
+test('资产深挖：详情 / 关系 / 图谱 / 时间线', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '深挖靶标' }, c);
+
+    const parent = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_add').handler(
+        { kind: 'domain', value: 'example.com' },
+        c,
+      )).content,
+    );
+    const child = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_add').handler(
+        { kind: 'host', value: 'admin.example.com', ip: '1.2.3.4', port: 8443 },
+        c,
+      )).content,
+    );
+
+    await toolNamed(api, 'redteam_asset_link').handler(
+      { from: parent.id, to: child.id, kind: 'subdomain' },
+      c,
+    );
+    const vuln = JSON.parse(
+      (await toolNamed(api, 'redteam_vuln_add').handler(
+        { assetId: child.id, title: '后台弱口令', level: 'high' },
+        c,
+      )).content,
+    );
+    await toolNamed(api, 'redteam_chain_add').handler(
+      { title: '发现后台', assetId: child.id, tool: 'httpx', result: '200' },
+      c,
+    );
+
+    const detail = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_get').handler({ assetId: child.id }, c)).content,
+    );
+    assert.equal(detail.asset.value, 'admin.example.com');
+    assert.equal(detail.vulns.length, 1);
+    assert.equal(detail.chains.length, 1);
+    assert.equal(detail.links.length, 1);
+
+    const graph = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_graph').handler({}, c)).content,
+    );
+    assert.equal(graph.nodes.length, 2);
+    assert.equal(graph.edges.length, 1);
+    assert.equal(graph.edges[0].kind, 'subdomain');
+
+    const timeline = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_timeline').handler({ assetId: child.id }, c)).content,
+    );
+    assert.ok(timeline.length >= 3, '资产/漏洞/链步骤都应进时间线');
+    assert.deepEqual(
+      timeline.map((e) => e.type).sort(),
+      ['asset', 'chain', 'vuln'],
+    );
+
+    // 漏洞关联校验
+    assert.equal(vuln.assetId, child.id);
+  });
+});
+
+test('漏洞状态流转后进入报告', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '流转靶标' }, c);
+    const asset = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_add').handler({ value: 'a.com' }, c)).content,
+    );
+    const vuln = JSON.parse(
+      (await toolNamed(api, 'redteam_vuln_add').handler(
+        { assetId: asset.id, title: 'SQL 注入', level: 'high' },
+        c,
+      )).content,
+    );
+
+    // found 状态不进报告
+    let report = JSON.parse(
+      (await toolNamed(api, 'redteam_score_report').handler({ markdown: false }, c)).content,
+    );
+    assert.equal(report.summary.vulns.reported, 0);
+
+    // 置为 confirmed 后进入报告
+    const updated = JSON.parse(
+      (await toolNamed(api, 'redteam_vuln_update').handler(
+        { id: vuln.id, status: 'confirmed', request: 'GET /?id=1%27' },
+        c,
+      )).content,
+    );
+    assert.equal(updated.status, 'confirmed');
+
+    report = JSON.parse(
+      (await toolNamed(api, 'redteam_score_report').handler({}, c)).content,
+    );
+    assert.equal(report.summary.vulns.reported, 1);
+    assert.match(report.markdown, /SQL 注入/);
+  });
+});
+
+test('HTTP 证据归档 + 截图生命周期', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '证据靶标' }, c);
+
+    const ev = JSON.parse(
+      (await toolNamed(api, 'redteam_http_evidence_add').handler(
+        {
+          url: 'http://a.com/api/user?id=1',
+          request: 'GET /api/user?id=1 HTTP/1.1\\nHost: a.com',
+          response: 'HTTP/1.1 200 OK\\n\\n{"name":"admin"}',
+          summary: '未授权访问用户信息',
+        },
+        c,
+      )).content,
+    );
+    assert.equal(ev.confidence, 'observed');
+    assert.equal(ev.kind, 'http');
+
+    // 无 url 的核实：直接标记
+    const plain = JSON.parse(
+      (await toolNamed(api, 'redteam_evidence_record').handler(
+        { summary: '目录存在 403', confidence: 'claimed' },
+        c,
+      )).content,
+    );
+    const verified = JSON.parse(
+      (await toolNamed(api, 'redteam_evidence_verify').handler(
+        { evidenceId: plain.id, method: '人工确认' },
+        c,
+      )).content,
+    );
+    assert.equal(verified.confidence, 'observed');
+
+    // 截图
+    const shot = JSON.parse(
+      (await toolNamed(api, 'redteam_shot_add').handler(
+        { path: 'runs/shot-1.png', note: '后台首页' },
+        c,
+      )).content,
+    );
+    assert.match(shot.id, /^P/);
+    let shots = JSON.parse((await toolNamed(api, 'redteam_shot_list').handler({}, c)).content);
+    assert.equal(shots.length, 1);
+    await toolNamed(api, 'redteam_shot_delete').handler({ id: shot.id }, c);
+    shots = JSON.parse((await toolNamed(api, 'redteam_shot_list').handler({}, c)).content);
+    assert.equal(shots.length, 0);
+  });
+});
+
+test('资产连通性探测：不可达时返回 ok=false 而不是抛错', async () => {
+  await withPlugin(async ({ api }) => {
+    const c = ctx();
+    await toolNamed(api, 'redteam_engagement_open').handler({ name: '探测靶标' }, c);
+    // 端口 1 基本不会有人监听，应快速拒绝
+    const result = JSON.parse(
+      (await toolNamed(api, 'redteam_asset_test').handler(
+        { target: '127.0.0.1:1', timeoutMs: 1500 },
+        c,
+      )).content,
+    );
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+    assert.equal(result.url, 'http://127.0.0.1:1');
   });
 });

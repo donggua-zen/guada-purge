@@ -21,10 +21,11 @@ const { RedteamDb } = require('./core/redteam-db');
 const { loadSkills } = require('./core/skills');
 const { runPreflight } = require('./core/preflight');
 const { buildReport, buildTargets } = require('./core/report');
+const { probe } = require('./core/probe');
 const store = require('./core/store');
 
 const PLUGIN_ID = 'guada-purge';
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 
 const KIT_ID = 'redteam';
 const AGENT_ID = 'leader';
@@ -905,6 +906,283 @@ class GuadaPurgePlugin {
       },
       dangerLevel: 'normal',
       handler: async (args) => json(plugin.db.resolveUnknown(args?.id, args?.resolvedAs)),
+    });
+
+    // ── 资产深挖（P3-2） ──
+
+    tool({
+      name: 'redteam_asset_get',
+      description: '单资产详情：本体 + 关联漏洞/证据/链步骤/入口/凭据/关系。',
+      parameters: {
+        type: 'object',
+        properties: { assetId: { type: 'string', description: '资产 id（A1/A2…）' } },
+        required: ['assetId'],
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) => {
+        const detail = plugin.db.assetDetail(eng(ctx).id, String(args?.assetId));
+        if (!detail) throw new Error(`资产不存在: ${args?.assetId}`);
+        return json(detail);
+      },
+    });
+
+    tool({
+      name: 'redteam_asset_link',
+      description: '建立资产关系（父域→子域、主机→服务、资产→跳板等），用于图谱与报告。',
+      parameters: {
+        type: 'object',
+        properties: {
+          from: { type: 'string', description: '源资产 id' },
+          to: { type: 'string', description: '目标资产 id' },
+          kind: {
+            type: 'string',
+            description: '关系类型：subdomain / resolves-to / hosts / pivot / related',
+          },
+          note: { type: 'string', description: '说明' },
+        },
+        required: ['from', 'to'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) =>
+        json(plugin.db.linkAssets({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_asset_graph',
+      description: '资产图谱：节点（资产）+ 边（关系）。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => {
+        const current = eng(ctx);
+        const assets = plugin.db.listAssets(current.id);
+        return json({
+          nodes: assets.map((a) => ({
+            id: a.id,
+            label: a.value,
+            kind: a.kind,
+            priority: a.priority,
+          })),
+          edges: plugin.db.listLinks(current.id),
+        });
+      },
+    });
+
+    tool({
+      name: 'redteam_asset_timeline',
+      description: '资产/漏洞/证据/链步骤的时间线（按时间正序），可限定单个资产。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string', description: '只看某个资产；省略则看全部' },
+        },
+      },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (args, ctx) =>
+        json(plugin.db.timeline(eng(ctx).id, args?.assetId || null)),
+    });
+
+    tool({
+      name: 'redteam_asset_test',
+      description:
+        '连通性探测：对资产发一次 HEAD（失败回退 GET），返回状态码/标题/指纹/耗时。' +
+        '用于确认"这个资产还活着吗"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          assetId: { type: 'string', description: '资产 id；与 target 二选一' },
+          target: { type: 'string', description: '直接给 URL 或 host:port' },
+          timeoutMs: { type: 'number', description: '超时毫秒，默认 5000' },
+          capture: { type: 'boolean', description: 'true = 把探测到的指纹写回资产的 surface' },
+        },
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        let target = args?.target;
+        if (!target && args?.assetId) {
+          const detail = plugin.db.assetDetail(current.id, String(args.assetId));
+          if (!detail) throw new Error(`资产不存在: ${args.assetId}`);
+          const a = detail.asset;
+          target = a.ip && a.port ? `${a.ip}:${a.port}` : a.value;
+        }
+        if (!target) throw new Error('需要 assetId 或 target');
+
+        const result = await probe(target, { timeoutMs: args?.timeoutMs });
+        if (args?.capture && args?.assetId && result.ok) {
+          const surface = [result.server, result.title].filter(Boolean).join(' ');
+          if (surface) plugin.db.assessAsset(String(args.assetId), { reason: `指纹：${surface}` });
+        }
+        return json(result);
+      },
+    });
+
+    // ── 状态流转（P3-2） ──
+
+    tool({
+      name: 'redteam_vuln_update',
+      description: '更新漏洞：状态流转（found → confirmed → exploited / false-positive）、等级、标题、原始请求。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '漏洞 id（V1…）' },
+          status: {
+            type: 'string',
+            enum: ['found', 'confirmed', 'exploited', 'false-positive', 'needs-auth', 'blocked'],
+          },
+          level: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'] },
+          title: { type: 'string' },
+          request: { type: 'string' },
+          response: { type: 'string' },
+        },
+        required: ['id'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) => {
+        const { id, ...patch } = args || {};
+        return json(plugin.db.updateVuln(String(id), patch));
+      },
+    });
+
+    tool({
+      name: 'redteam_webshell_update',
+      description: '更新 WebShell：标记是否已实测连通、改地址或类型。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          url: { type: 'string' },
+          type: { type: 'string' },
+          verified: { type: 'boolean', description: 'true = 已实测能执行命令' },
+        },
+        required: ['id'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) => {
+        const { id, ...patch } = args || {};
+        return json(plugin.db.updateWebshell(String(id), patch));
+      },
+    });
+
+    tool({
+      name: 'redteam_tunnel_update',
+      description: '更新隧道：标记是否已实测可达、改监听地址/入口类型/可达网段。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          listen: { type: 'string' },
+          reachable: { type: 'string' },
+          entryKind: { type: 'string' },
+          verified: { type: 'boolean' },
+        },
+        required: ['id'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) => {
+        const { id, ...patch } = args || {};
+        return json(plugin.db.updateTunnel(String(id), patch));
+      },
+    });
+
+    // ── 证据补充（P3-2） ──
+
+    tool({
+      name: 'redteam_evidence_verify',
+      description:
+        '复现/核实一条证据：给出 URL 时实际发请求比对，把证据升级为 observed 并记录核实方式。',
+      parameters: {
+        type: 'object',
+        properties: {
+          evidenceId: { type: 'string', description: '证据 id（E1…）' },
+          url: { type: 'string', description: '要复现的目标（省略则用证据里记录的 url）' },
+          method: { type: 'string', description: '核实方式说明（如 curl 实测登录）' },
+        },
+        required: ['evidenceId'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => {
+        const current = eng(ctx);
+        const rows = plugin.db.listEvidence(current.id);
+        const ev = rows.find((e) => e.id === String(args?.evidenceId));
+        if (!ev) throw new Error(`证据不存在: ${args?.evidenceId}`);
+
+        const target = args?.url || ev.url;
+        const detail = args?.method ? String(args.method) : '人工核实';
+
+        if (!target) {
+          return json(plugin.db.upgradeEvidence(ev.id, detail));
+        }
+        const result = await probe(target, { timeoutMs: 5000 });
+        const summary = result.ok
+          ? `${detail}｜复现 ${target} → ${result.status}${result.title ? `「${result.title}」` : ''}`
+          : `${detail}｜复现失败 ${target}：${result.error}`;
+        return json({
+          probe: result,
+          evidence: result.ok ? plugin.db.upgradeEvidence(ev.id, summary) : ev,
+        });
+      },
+    });
+
+    tool({
+      name: 'redteam_http_evidence_add',
+      description: '归档一条原始 HTTP 报文（请求+响应），作为漏洞复现证据（直接记为 observed）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '请求地址' },
+          request: { type: 'string', description: '原始请求' },
+          response: { type: 'string', description: '关键响应' },
+          assetId: { type: 'string', description: '关联资产' },
+          vulnId: { type: 'string', description: '关联漏洞' },
+          summary: { type: 'string', description: '一句话说明' },
+        },
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) =>
+        json(plugin.db.addHttpEvidence({ ...args, eng: eng(ctx).id })),
+    });
+
+    // ── 截图（P3-2） ──
+
+    tool({
+      name: 'redteam_shot_add',
+      description: '登记一张截图（路径 + 关联资产/漏洞），报告引用时用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '截图路径或引用' },
+          assetId: { type: 'string' },
+          vulnId: { type: 'string' },
+          note: { type: 'string', description: '截图内容说明' },
+        },
+        required: ['path'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args, ctx) => json(plugin.db.addShot({ ...args, eng: eng(ctx).id })),
+    });
+
+    tool({
+      name: 'redteam_shot_list',
+      description: '列出已登记的截图。',
+      parameters: { type: 'object', properties: {} },
+      dangerLevel: 'safe',
+      readOnly: true,
+      handler: async (_args, ctx) => json(plugin.db.listShots(eng(ctx).id)),
+    });
+
+    tool({
+      name: 'redteam_shot_delete',
+      description: '删除一条截图登记（不删磁盘文件）。',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+      },
+      dangerLevel: 'normal',
+      handler: async (args) => json(plugin.db.deleteShot(String(args?.id))),
     });
   }
 }

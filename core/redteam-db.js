@@ -45,6 +45,10 @@ const EMPTY = () => ({
   attackFiles: [],
   /** 未知资产（看到了但说不清）：{ id, eng, value, note, status, resolvedAs, createdAt } */
   unknowns: [],
+  /** 资产关系：{ eng, from, to, kind, note, createdAt } */
+  links: [],
+  /** 截图/证据文件：{ id, eng, assetId, vulnId, path, note, createdAt } */
+  shots: [],
 });
 
 class RedteamDb {
@@ -563,6 +567,170 @@ class RedteamDb {
     row.resolvedAs = String(resolvedAs || '');
     this.save();
     return row;
+  }
+
+  // ── 资产关系与时间线 ──
+
+  linkAssets({ eng, from, to, kind, note }) {
+    const data = this.load();
+    if (!from || !to) throw new Error('link 需要 from 与 to');
+    const row = {
+      eng,
+      from: String(from),
+      to: String(to),
+      kind: kind || 'related',
+      note: note || '',
+      createdAt: new Date().toISOString(),
+    };
+    const exists = data.links.find(
+      (l) => l.eng === eng && l.from === row.from && l.to === row.to && l.kind === row.kind,
+    );
+    if (exists) return exists;
+    data.links.push(row);
+    this.save();
+    return row;
+  }
+
+  listLinks(eng) {
+    const data = this.load();
+    return data.links.filter((l) => !eng || l.eng === eng);
+  }
+
+  /** 单资产详情：资产本体 + 关联漏洞/证据/链步骤/入口/关系 */
+  assetDetail(eng, assetId) {
+    const data = this.load();
+    const asset = data.assets[assetId];
+    if (!asset || asset.eng !== eng) return null;
+    const links = data.links.filter((l) => l.eng === eng && (l.from === assetId || l.to === assetId));
+    return {
+      asset,
+      vulns: Object.values(data.vulns).filter((v) => v.eng === eng && v.assetId === assetId),
+      evidence: Object.values(data.evidence).filter((e) => e.eng === eng && e.assetId === assetId),
+      chains: data.chains.filter((c) => c.eng === eng && c.assetId === assetId),
+      webshells: Object.values(data.webshells).filter((w) => w.eng === eng && w.assetId === assetId),
+      credentials: Object.values(data.credentials).filter((c) => c.eng === eng && c.assetId === assetId),
+      links,
+    };
+  }
+
+  /** 时间线：把资产/漏洞/证据/链步骤/入口按时间排序 */
+  timeline(eng, assetId) {
+    const data = this.load();
+    // 资产自身用 id 匹配（其他记录用 assetId）
+    const assets = Object.values(data.assets)
+      .filter((a) => a.eng === eng && (!assetId || a.id === assetId))
+      .map((a) => ({ at: a.createdAt, type: 'asset', id: a.id, label: `${a.value} 入库` }));
+
+    const pick = (arr, type, label) =>
+      arr
+        .filter((x) => x.eng === eng && (!assetId || x.assetId === assetId))
+        .map((x) => ({ at: x.createdAt, type, id: x.id, label: label(x) }));
+
+    const events = [
+      ...assets,
+      ...pick(Object.values(data.vulns), 'vuln', (v) => `${v.title}（${v.level}）`),
+      ...pick(Object.values(data.evidence), 'evidence', (e) => e.summary),
+      ...pick(data.chains, 'chain', (c) => c.title),
+      ...pick(Object.values(data.webshells), 'webshell', (w) => w.url),
+      ...pick(Object.values(data.credentials), 'credential', (c) => c.username),
+    ];
+    return events
+      .filter((e) => e.at)
+      .sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  }
+
+  // ── 更新类（状态流转） ──
+
+  updateVuln(id, patch) {
+    const data = this.load();
+    const row = data.vulns[id];
+    if (!row) throw new Error(`漏洞不存在: ${id}`);
+    for (const key of ['title', 'level', 'status', 'request', 'response']) {
+      if (patch?.[key] !== undefined) row[key] = patch[key];
+    }
+    row.updatedAt = new Date().toISOString();
+    this.save();
+    return row;
+  }
+
+  updateWebshell(id, patch) {
+    const data = this.load();
+    const row = data.webshells[id];
+    if (!row) throw new Error(`WebShell 不存在: ${id}`);
+    if (patch?.url !== undefined) row.url = patch.url;
+    if (patch?.type !== undefined) row.type = patch.type;
+    if (patch?.verified !== undefined) row.verified = patch.verified === true;
+    row.updatedAt = new Date().toISOString();
+    this.save();
+    return row;
+  }
+
+  updateTunnel(id, patch) {
+    const data = this.load();
+    const row = data.tunnels[id];
+    if (!row) throw new Error(`隧道不存在: ${id}`);
+    if (patch?.listen !== undefined) row.listen = patch.listen;
+    if (patch?.reachable !== undefined) row.reachable = patch.reachable;
+    if (patch?.entryKind !== undefined) row.entryKind = patch.entryKind;
+    if (patch?.verified !== undefined) row.verified = patch.verified === true;
+    row.updatedAt = new Date().toISOString();
+    this.save();
+    return row;
+  }
+
+  // ── HTTP 证据与截图 ──
+
+  addHttpEvidence(input) {
+    const data = this.load();
+    const id = this.nextId('evidence');
+    const row = {
+      id,
+      eng: input.eng,
+      kind: 'http',
+      assetId: input.assetId || '',
+      vulnId: input.vulnId || '',
+      summary: String(input.summary || input.url || '').trim() || 'HTTP 证据',
+      confidence: 'observed',
+      url: input.url || '',
+      request: input.request || '',
+      response: input.response || '',
+      verifiedResult: '原始报文已归档',
+      createdAt: new Date().toISOString(),
+    };
+    data.evidence[id] = row;
+    this.save();
+    return row;
+  }
+
+  addShot(input) {
+    const data = this.load();
+    const id = `P${Date.now().toString(36)}`;
+    const row = {
+      id,
+      eng: input.eng,
+      assetId: input.assetId || '',
+      vulnId: input.vulnId || '',
+      path: String(input.path || '').trim(),
+      note: input.note || '',
+      createdAt: new Date().toISOString(),
+    };
+    data.shots.push(row);
+    this.save();
+    return row;
+  }
+
+  listShots(eng) {
+    const data = this.load();
+    return data.shots.filter((s) => !eng || s.eng === eng);
+  }
+
+  deleteShot(id) {
+    const data = this.load();
+    const before = data.shots.length;
+    data.shots = data.shots.filter((s) => s.id !== id);
+    const removed = before - data.shots.length;
+    if (removed > 0) this.save();
+    return { removed };
   }
 }
 
