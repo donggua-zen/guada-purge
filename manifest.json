@@ -1,16 +1,12 @@
 {
   "id": "guada-purge",
   "name": "GuaDa Purge",
-  "version": "0.2.0",
-  "description": "人格、规则与技能控制台 —— GuaDa 三方插件参考实现（dsh-purge 风格）",
+  "version": "1.0.0",
+  "description": "安全研究工作模式 —— 专属智能体 + 按目录生效的规则集 + 方法论技能库（不修改宿主、不绕过安全策略）",
   "author": "donggua-zen",
   "category": "user",
   "icon": "assets/icon.svg",
   "main": "index.js",
-  "apiVersion": 2,
-  "permissions": ["prompt", "fs"],
-  "entries": {
-    "backend": "index.js",
-    "frontend": "frontend/dist"
-  }
+  "apiVersion": 4,
+  "permissions": ["prompt"]
 }

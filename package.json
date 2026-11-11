@@ -1,13 +1,12 @@
 {
   "name": "guada-purge",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "GuaDa third-party plugin: persona, rules and skills console",
+  "description": "GuaDa third-party plugin: security-research work mode (dedicated agent + rules + skills)",
   "license": "MIT",
   "scripts": {
     "check": "node --check index.js",
-    "test": "node --test core/*.test.js",
-    "build": "node build.mjs"
+    "test": "node --test core/*.test.js"
   },
   "engines": {
     "node": ">=18"

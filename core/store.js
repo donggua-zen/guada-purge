@@ -1,31 +1,22 @@
 'use strict';
 
 /**
- * 插件数据目录读写（Phase 1）
+ * 插件数据目录读写（v1 精简版）
  *
- * - 所有写入走临时文件 + rename，避免半截 JSON；
- * - 坏文件重命名成 .bad 后回退默认值，不阻塞启动；
- * - 首次运行把随包 presets/rules/*.md 复制到数据目录（不覆盖用户已有文件）。
+ * 只负责「规则集文件」这一件事：
+ * - 首次运行把随包 presets/rules/*.md 复制到数据目录（不覆盖用户已改过的文件）；
+ * - 列出 / 读取规则文件；
+ * - 其余（state.json / prompt-inject.md）已随 v1 重构废弃，文件保留但不读取。
+ *
+ * 无写入路径：本版没有编辑 UI，规则由用户手工编辑（改完重载插件生效）。
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { createState, parseState } = require('./state');
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-function writeTextAtomic(file, text) {
-  ensureDir(path.dirname(file));
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, text, 'utf8');
-  fs.renameSync(tmp, file);
-}
-
-function writeJsonAtomic(file, value) {
-  writeTextAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function readText(file, fallback = '') {
@@ -36,32 +27,8 @@ function readText(file, fallback = '') {
   }
 }
 
-function loadState(dataDir) {
-  const file = path.join(dataDir, 'state.json');
-  if (!fs.existsSync(file)) return createState();
-  const raw = readText(file);
-  const { state, corrupted } = parseState(raw);
-  if (corrupted) {
-    try {
-      fs.renameSync(file, `${file}.bad`);
-    } catch {
-      /* ignore */
-    }
-  }
-  return state;
-}
-
-function saveState(dataDir, state) {
-  writeJsonAtomic(path.join(dataDir, 'state.json'), state);
-  return state;
-}
-
-function loadPromptInject(dataDir) {
-  return readText(path.join(dataDir, 'prompt-inject.md'), '');
-}
-
-function savePromptInject(dataDir, text) {
-  writeTextAtomic(path.join(dataDir, 'prompt-inject.md'), String(text || ''));
+function safeRuleId(id) {
+  return String(id || '').replace(/[^A-Za-z0-9._-]/g, '');
 }
 
 function listRuleFiles(dataDir) {
@@ -74,25 +41,9 @@ function listRuleFiles(dataDir) {
 }
 
 function readRuleFile(dataDir, id) {
-  const safe = String(id || '').replace(/[^A-Za-z0-9._-]/g, '');
+  const safe = safeRuleId(id);
   if (!safe) return '';
   return readText(path.join(dataDir, 'rules', `${safe}.md`), '');
-}
-
-function writeRuleFile(dataDir, id, content) {
-  const safe = String(id || '').replace(/[^A-Za-z0-9._-]/g, '');
-  if (!safe) throw new Error('invalid rule id');
-  writeTextAtomic(path.join(dataDir, 'rules', `${safe}.md`), String(content || ''));
-  return safe;
-}
-
-function deleteRuleFile(dataDir, id) {
-  const safe = String(id || '').replace(/[^A-Za-z0-9._-]/g, '');
-  if (!safe) return false;
-  const file = path.join(dataDir, 'rules', `${safe}.md`);
-  if (!fs.existsSync(file)) return false;
-  fs.unlinkSync(file);
-  return true;
 }
 
 /** 首次运行：把插件自带 presets/rules 复制到数据目录（只补缺失文件） */
@@ -114,16 +65,8 @@ function seedRules(pluginDir, dataDir) {
 
 module.exports = {
   ensureDir,
-  writeTextAtomic,
-  writeJsonAtomic,
   readText,
-  loadState,
-  saveState,
-  loadPromptInject,
-  savePromptInject,
   listRuleFiles,
   readRuleFile,
-  writeRuleFile,
-  deleteRuleFile,
   seedRules,
 };
